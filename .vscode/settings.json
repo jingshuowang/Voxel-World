@@ -1,5 +1,5 @@
 {
     "java.project.referencedLibraries": [
-        "javalib/**/*.jar"
+        "lib/**/*.jar"
     ]
 }
