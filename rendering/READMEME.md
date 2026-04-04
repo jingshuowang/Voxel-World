@@ -13,6 +13,7 @@ Basic rendering. GPU calls via OpenGL.
 
 ## Responsibilities
 - Block mesh rendering (flat vertex colors)
-- Sky gradient (clear color based on sun position)
-- Sun/moon circles (simple billboard quads)
-- Projection/view matrix setup
+- Sky basic rendering
+- sky objects rendering sun and moon which is just circle for now.
+-rendering daylight cycle
+-

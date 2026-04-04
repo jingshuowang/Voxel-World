@@ -9,6 +9,11 @@ import static org.lwjgl.opengl.GL30.*;
 public class Chunk {
     public static final int CHUNK_SIZE = 16;
 
+    @FunctionalInterface
+    public interface BlockLookup {
+        byte getBlock(int globalX, int globalY, int globalZ);
+    }
+
     // Block types
     public static final byte AIR = 0;
     public static final byte GRASS = 1;
@@ -31,8 +36,8 @@ public class Chunk {
     private int vertexCount;
 
     // Staged mesh data (computed on background thread, uploaded on main thread)
-    private float[] stagedVertices;
-    private int[] stagedIndices;
+    public float[] stagedVertices;
+    public int[] stagedIndices;
     public volatile boolean meshReady = false;
 
     // Block colors: [R, G, B] per type
@@ -65,6 +70,14 @@ public class Chunk {
         if (x < 0 || x >= CHUNK_SIZE || y < 0 || y >= CHUNK_SIZE || z < 0 || z >= CHUNK_SIZE)
             return 0;
         return blocks[getIndex(x, y, z)];
+    }
+
+    private byte getBlockOrGlobal(int x, int y, int z, BlockLookup lookup) {
+        if (x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE)
+            return blocks[getIndex(x, y, z)];
+        if (lookup != null)
+            return lookup.getBlock(chunkX * CHUNK_SIZE + x, chunkY * CHUNK_SIZE + y, chunkZ * CHUNK_SIZE + z);
+        return AIR;
     }
 
     // ---- Perlin Noise ----
@@ -114,20 +127,20 @@ public class Chunk {
     }
 
     public static int getTerrainHeight(int globalX, int globalZ) {
-        // Higher frequency, squared for dramatic peaks
-        double nx = globalX * 0.02;   // Higher frequency for more features
-        double nz = globalZ * 0.02;
+        // Adjust terrain via variables in Config.java
+        double nx = globalX * Config.PERLIN_FREQUENCY;
+        double nz = globalZ * Config.PERLIN_FREQUENCY;
 
-        // Two octaves of noise
+        // Three octaves of noise
         double n1 = perlinNoise2D(nx, nz);
         double n2 = perlinNoise2D(nx * 2.5, nz * 2.5) * 0.4;
+        double n3 = perlinNoise2D(nx * 6.25, nz * 6.25) * 0.16;
 
-        double combined = n1 + n2;
-        // Square it but preserve sign for dramatic valleys and peaks
-        double squared = Math.signum(combined) * combined * combined;
+        double combined = n1 + n2 + n3;
+        // Raise to power of 3 (or whatever Config.PERLIN_POWER is set to) while preserving sign
+        double powered = Math.signum(combined) * Math.pow(Math.abs(combined), Config.PERLIN_POWER);
 
-        // Lower amplitude - squaring already makes peaks dramatic
-        double height = squared * 8.0;
+        double height = powered * Config.PERLIN_AMPLITUDE;
         return 40 + (int) height; // Base ground at Y=40
     }
 
@@ -146,16 +159,19 @@ public class Chunk {
                     if (globalY <= terrainHeight) {
                         // Underground / surface
                         if (globalY == terrainHeight) {
-                            // Surface block - biome by height
-                            if (terrainHeight > 50) {
-                                setBlock(x, y, z, SNOW);      // Highest = Snow
-                            } else if (terrainHeight > 44) {
-                                setBlock(x, y, z, STONE);     // 2nd highest = Stone
+                            // Surface block - biome by relative height vs water level
+                            // (Lowered thresholds so snow appears more often)
+                            if (terrainHeight > WATER_LEVEL + 40) {
+                                setBlock(x, y, z, SNOW);      // High = Snow
+                            } else if (terrainHeight > WATER_LEVEL + 15) {
+                                setBlock(x, y, z, STONE);     // Moderately high = Stone
+                            } else if (terrainHeight >= WATER_LEVEL - 2) {
+                                setBlock(x, y, z, GRASS);     // Ground/shore = Grass
                             } else {
-                                setBlock(x, y, z, GRASS);     // Normal = Grass
+                                setBlock(x, y, z, DIRT);      // Underwater bottom = Dirt
                             }
                         } else if (globalY > terrainHeight - 4) {
-                            // Just below surface: dirt (grass with block above = dirt)
+                            // Just below surface: dirt
                             setBlock(x, y, z, DIRT);
                         } else {
                             setBlock(x, y, z, STONE);         // Deep = always stone
@@ -172,132 +188,80 @@ public class Chunk {
 
     // Phase 1: Greedy meshing on ANY thread (no GL calls!)
     // Merges adjacent same-type faces into larger quads for massive triangle reduction.
-    public void buildMeshData() {
+    // Phase 1: Naive Meshing
+    public void buildMeshData() { buildMeshData(null); }
+    public void buildMeshData(BlockLookup lookup) {
         List<Float> verticesList = new ArrayList<>();
         List<Integer> indicesList = new ArrayList<>();
         int indexOffset = 0;
 
-        // Normal vectors and shade levels per face direction
-        // 0=+Z, 1=-Z, 2=+Y, 3=-Y, 4=+X, 5=-X
         float[][] normals = {{0,0,1},{0,0,-1},{0,1,0},{0,-1,0},{1,0,0},{-1,0,0}};
         float[] shadeLevels = {0.8f, 0.8f, 1.0f, 0.5f, 0.75f, 0.75f};
 
-        // For each face direction, do greedy meshing on 2D slices
-        for (int face = 0; face < 6; face++) {
-            // Determine which axis is the "depth" (perpendicular to face)
-            // and which two axes form the 2D slice
-            // face 0(+Z): depth=z, u=x, v=y
-            // face 1(-Z): depth=z, u=x, v=y
-            // face 2(+Y): depth=y, u=x, v=z
-            // face 3(-Y): depth=y, u=x, v=z
-            // face 4(+X): depth=x, u=z, v=y
-            // face 5(-X): depth=x, u=z, v=y
+        float gox = chunkX * CHUNK_SIZE;
+        float goy = chunkY * CHUNK_SIZE;
+        float goz = chunkZ * CHUNK_SIZE;
 
-            for (int d = 0; d < CHUNK_SIZE; d++) {
-                // Build a 2D mask of which block type is visible on this face
-                byte[] mask = new byte[CHUNK_SIZE * CHUNK_SIZE];
+        for (int y = 0; y < CHUNK_SIZE; y++) {
+            for (int x = 0; x < CHUNK_SIZE; x++) {
+                for (int z = 0; z < CHUNK_SIZE; z++) {
+                    byte type = getBlock(x, y, z);
+                    if (type == AIR) continue;
 
-                for (int v = 0; v < CHUNK_SIZE; v++) {
-                    for (int u = 0; u < CHUNK_SIZE; u++) {
-                        int x, y, z;
-                        switch (face) {
-                            case 0: x=u; y=v; z=d; break; // +Z
-                            case 1: x=u; y=v; z=d; break; // -Z
-                            case 2: x=u; y=d; z=v; break; // +Y
-                            case 3: x=u; y=d; z=v; break; // -Y
-                            case 4: x=d; y=v; z=u; break; // +X
-                            case 5: x=d; y=v; z=u; break; // -X
-                            default: x=0; y=0; z=0;
-                        }
-                        byte type = getBlock(x, y, z);
-                        if (type == AIR) continue;
+                    float cx = gox + x;
+                    float cy = goy + y;
+                    float cz = goz + z;
 
-                        // Check if face is exposed (neighbor is air or out of chunk)
+                    for (int face = 0; face < 6; face++) {
                         boolean exposed = false;
                         switch (face) {
-                            case 0: exposed = (z == CHUNK_SIZE-1 || getBlock(x,y,z+1) == AIR); break;
-                            case 1: exposed = (z == 0 || getBlock(x,y,z-1) == AIR); break;
-                            case 2: exposed = (y == CHUNK_SIZE-1 || getBlock(x,y+1,z) == AIR); break;
-                            case 3: exposed = (y == 0 || getBlock(x,y-1,z) == AIR); break;
-                            case 4: exposed = (x == CHUNK_SIZE-1 || getBlock(x+1,y,z) == AIR); break;
-                            case 5: exposed = (x == 0 || getBlock(x-1,y,z) == AIR); break;
+                            case 0: exposed = (getBlockOrGlobal(x,y,z+1, lookup) == AIR); break;
+                            case 1: exposed = (getBlockOrGlobal(x,y,z-1, lookup) == AIR); break;
+                            case 2: exposed = (getBlockOrGlobal(x,y+1,z, lookup) == AIR); break;
+                            case 3: exposed = (getBlockOrGlobal(x,y-1,z, lookup) == AIR); break;
+                            case 4: exposed = (getBlockOrGlobal(x+1,y,z, lookup) == AIR); break;
+                            case 5: exposed = (getBlockOrGlobal(x-1,y,z, lookup) == AIR); break;
                         }
-                        if (exposed) mask[v * CHUNK_SIZE + u] = type;
-                    }
-                }
+                        
+                        if (!exposed) continue;
 
-                // Greedy merge: scan the 2D mask and merge rectangles
-                boolean[] visited = new boolean[CHUNK_SIZE * CHUNK_SIZE];
-                for (int v = 0; v < CHUNK_SIZE; v++) {
-                    for (int u = 0; u < CHUNK_SIZE; u++) {
-                        int idx = v * CHUNK_SIZE + u;
-                        if (visited[idx] || mask[idx] == 0) continue;
-                        byte type = mask[idx];
-
-                        // Expand width (u direction)
-                        int w = 1;
-                        while (u + w < CHUNK_SIZE && mask[v * CHUNK_SIZE + u + w] == type && !visited[v * CHUNK_SIZE + u + w])
-                            w++;
-
-                        // Expand height (v direction)
-                        int h = 1;
-                        outer:
-                        while (v + h < CHUNK_SIZE) {
-                            for (int k = 0; k < w; k++) {
-                                int ci = (v + h) * CHUNK_SIZE + u + k;
-                                if (mask[ci] != type || visited[ci]) break outer;
-                            }
-                            h++;
-                        }
-
-                        // Mark visited
-                        for (int dv = 0; dv < h; dv++)
-                            for (int du = 0; du < w; du++)
-                                visited[(v + dv) * CHUNK_SIZE + u + du] = true;
-
-                        // Emit one quad for the merged rectangle
-                        float gox = chunkX * CHUNK_SIZE;
-                        float goy = chunkY * CHUNK_SIZE;
-                        float goz = chunkZ * CHUNK_SIZE;
-
-                        // Calculate 4 corner positions based on face direction
-                        float x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3;
+                        float x0=0,y0=0,z0=0, x1=0,y1=0,z1=0, x2=0,y2=0,z2=0, x3=0,y3=0,z3=0;
                         switch (face) {
-                            case 0: // +Z face (z = d+1)
-                                x0=gox+u;     y0=goy+v;     z0=goz+d+1;
-                                x1=gox+u+w;   y1=goy+v;     z1=goz+d+1;
-                                x2=gox+u+w;   y2=goy+v+h;   z2=goz+d+1;
-                                x3=gox+u;     y3=goy+v+h;   z3=goz+d+1;
+                            case 0: // +Z
+                                x0=cx;   y0=cy;   z0=cz+1;
+                                x1=cx+1; y1=cy;   z1=cz+1;
+                                x2=cx+1; y2=cy+1; z2=cz+1;
+                                x3=cx;   y3=cy+1; z3=cz+1;
                                 break;
-                            case 1: // -Z face (z = d)
-                                x0=gox+u+w;   y0=goy+v;     z0=goz+d;
-                                x1=gox+u;     y1=goy+v;     z1=goz+d;
-                                x2=gox+u;     y2=goy+v+h;   z2=goz+d;
-                                x3=gox+u+w;   y3=goy+v+h;   z3=goz+d;
+                            case 1: // -Z
+                                x0=cx+1; y0=cy;   z0=cz;
+                                x1=cx;   y1=cy;   z1=cz;
+                                x2=cx;   y2=cy+1; z2=cz;
+                                x3=cx+1; y3=cy+1; z3=cz;
                                 break;
-                            case 2: // +Y face (y = d+1)
-                                x0=gox+u;     y0=goy+d+1;   z0=goz+v;
-                                x1=gox+u+w;   y1=goy+d+1;   z1=goz+v;
-                                x2=gox+u+w;   y2=goy+d+1;   z2=goz+v+h;
-                                x3=gox+u;     y3=goy+d+1;   z3=goz+v+h;
+                            case 2: // +Y
+                                x0=cx;   y0=cy+1; z0=cz+1;
+                                x1=cx+1; y1=cy+1; z1=cz+1;
+                                x2=cx+1; y2=cy+1; z2=cz;
+                                x3=cx;   y3=cy+1; z3=cz;
                                 break;
-                            case 3: // -Y face (y = d)
-                                x0=gox+u;     y0=goy+d;     z0=goz+v+h;
-                                x1=gox+u+w;   y1=goy+d;     z1=goz+v+h;
-                                x2=gox+u+w;   y2=goy+d;     z2=goz+v;
-                                x3=gox+u;     y3=goy+d;     z3=goz+v;
+                            case 3: // -Y
+                                x0=cx;   y0=cy;   z0=cz;
+                                x1=cx+1; y1=cy;   z1=cz;
+                                x2=cx+1; y2=cy;   z2=cz+1;
+                                x3=cx;   y3=cy;   z3=cz+1;
                                 break;
-                            case 4: // +X face (x = d+1)
-                                x0=gox+d+1;   y0=goy+v;     z0=goz+u+w;
-                                x1=gox+d+1;   y1=goy+v;     z1=goz+u;
-                                x2=gox+d+1;   y2=goy+v+h;   z2=goz+u;
-                                x3=gox+d+1;   y3=goy+v+h;   z3=goz+u+w;
+                            case 4: // +X
+                                x0=cx+1; y0=cy;   z0=cz+1;
+                                x1=cx+1; y1=cy;   z1=cz;
+                                x2=cx+1; y2=cy+1; z2=cz;
+                                x3=cx+1; y3=cy+1; z3=cz+1;
                                 break;
-                            default: // -X face (x = d)
-                                x0=gox+d;     y0=goy+v;     z0=goz+u;
-                                x1=gox+d;     y1=goy+v;     z1=goz+u+w;
-                                x2=gox+d;     y2=goy+v+h;   z2=goz+u+w;
-                                x3=gox+d;     y3=goy+v+h;   z3=goz+u;
+                            case 5: // -X
+                                x0=cx;   y0=cy;   z0=cz;
+                                x1=cx;   y1=cy;   z1=cz+1;
+                                x2=cx;   y2=cy+1; z2=cz+1;
+                                x3=cx;   y3=cy+1; z3=cz;
                                 break;
                         }
 
@@ -307,9 +271,9 @@ public class Chunk {
                         float cg = BLOCK_COLORS[type][1];
                         float cb = BLOCK_COLORS[type][2];
 
-                        // 4 vertices per quad, 12 floats each
                         float[][] corners = {{x0,y0,z0},{x1,y1,z1},{x2,y2,z2},{x3,y3,z3}};
-                        float[][] uvs = {{0,0},{w,0},{w,h},{0,h}};
+                        float[][] uvs = {{0,0},{1,0},{1,1},{0,1}};
+                        
                         for (int c = 0; c < 4; c++) {
                             verticesList.add(corners[c][0]); verticesList.add(corners[c][1]); verticesList.add(corners[c][2]);
                             verticesList.add(uvs[c][0]); verticesList.add(uvs[c][1]);
@@ -319,8 +283,8 @@ public class Chunk {
                         }
 
                         // 2 triangles (CCW winding)
-                        indicesList.add(indexOffset + 2); indicesList.add(indexOffset + 1); indicesList.add(indexOffset);
-                        indicesList.add(indexOffset); indicesList.add(indexOffset + 3); indicesList.add(indexOffset + 2);
+                        indicesList.add(indexOffset); indicesList.add(indexOffset + 1); indicesList.add(indexOffset + 2);
+                        indicesList.add(indexOffset); indicesList.add(indexOffset + 2); indicesList.add(indexOffset + 3);
                         indexOffset += 4;
                     }
                 }
@@ -385,14 +349,16 @@ public class Chunk {
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindVertexArray(0);
 
-        stagedVertices = null;
-        stagedIndices = null;
+        // Keep staged data around for physics mesh building!
+        // stagedVertices = null;
+        // stagedIndices = null;
         meshReady = false;
     }
 
     // Legacy single-thread buildMesh (for immediate rebuild after block edit)
-    public void buildMesh() {
-        buildMeshData();
+    public void buildMesh() { buildMesh(null); }
+    public void buildMesh(BlockLookup lookup) {
+        buildMeshData(lookup);
         uploadMesh();
     }
 

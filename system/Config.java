@@ -23,4 +23,9 @@ public class Config {
     public static float GROUND_SLIPPERINESS = 0.6f; // Slipperiness (lower = faster stop)
     public static float AIR_ACCELERATION = 1f; // Sluggish air control
     public static float AIR_SLIPPERINESS = 0.9f; // Less momentum retained in the air (0.75)
+
+    // --- TERRAIN GENERATION ---
+    public static float PERLIN_AMPLITUDE = 150.0f; // Multiplier for terrain height
+    public static float PERLIN_FREQUENCY = 0.08f; // Zoom level / frequency of features
+    public static float PERLIN_POWER = 2.0f; // Exponent for valleys and peaks
 }

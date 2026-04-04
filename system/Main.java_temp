@@ -18,7 +18,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.lwjgl.glfw.Callbacks.*;
@@ -41,17 +40,16 @@ public class Main {
     private int whiteTextureId; // Procedural 1x1 white pixel (no image files needed)
     private Map<Long, Chunk> worldChunks;
     private static final int LOAD_RADIUS_XZ = 8;
-    private static final int LOAD_RADIUS_Y = 64; // 64 chunks up, 64 chunks down
-    private static final int UNLOAD_RADIUS = 12; // Unload distance usually larger than LOAD_RADIUS_XZ
+    private static final int LOAD_RADIUS_Y = 8;
+    private static final int UNLOAD_RADIUS = 12;
     
     // Background chunk generation thread
     private final ConcurrentLinkedQueue<Chunk> chunksToUpload = new ConcurrentLinkedQueue<>();
     private final Set<Long> chunksLoading = java.util.Collections.synchronizedSet(new HashSet<>());
-    private final java.util.ArrayDeque<Long> chunksNeedingRebuild = new java.util.ArrayDeque<>();
     private volatile boolean chunkThreadRunning = true;
     private Thread chunkGenThread;
 
-    public static Physics physics;
+    // Camera Input State
     private boolean[] keys = new boolean[GLFW_KEY_LAST];
     private double lastMouseX = -1;
     private double lastMouseY = -1;
@@ -228,10 +226,8 @@ public class Main {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
         glfwMakeContextCurrent(window);
-        glfwSwapInterval(0); // Enable v-sync
+        glfwSwapInterval(1); // Enable v-sync
         glfwShowWindow(window);
-        
-        physics = new Physics();
     }
 
     public Chunk setBlockGlobal(int x, int y, int z, byte type) {
@@ -264,9 +260,8 @@ public class Main {
     }
 
     private static long packChunkKey(int cx, int cy, int cz) {
-        // Pack 3 ints into a long to support massive worlds (2^24+ chunks horizontally)
-        // cx in bits 38-63 (26 bits), cz in bits 12-37 (26 bits), cy in bits 0-11 (12 bits)
-        return ((long)(cx & 0x3FFFFFF) << 38) | ((long)(cz & 0x3FFFFFF) << 12) | (cy & 0xFFF);
+        // Pack 3 ints into a long: cx in bits 42-63, cy in bits 21-41, cz in bits 0-20
+        return ((long)(cx & 0x1FFFFF) << 42) | ((long)(cy & 0x1FFFFF) << 21) | (cz & 0x1FFFFF);
     }
 
     private void updateChunks() {
@@ -282,41 +277,14 @@ public class Main {
             chunk.uploadMesh();
             long key = packChunkKey(chunk.chunkX, chunk.chunkY, chunk.chunkZ);
             worldChunks.put(key, chunk);
-            if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
-                physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
-            }
             chunksLoading.remove(key);
-            // Queue neighbors for deferred rebuild
-            int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-            for (int[] d : dirs) {
-                long nk = packChunkKey(chunk.chunkX+d[0], chunk.chunkY+d[1], chunk.chunkZ+d[2]);
-                if (worldChunks.containsKey(nk)) {
-                    chunksNeedingRebuild.add(nk);
-                }
-            }
             uploaded++;
-        }
-
-        // Process deferred neighbor rebuilds (max 4 per frame)
-        int rebuilt = 0;
-        while (rebuilt < 4 && !chunksNeedingRebuild.isEmpty()) {
-            long nk = chunksNeedingRebuild.poll();
-            Chunk nb = worldChunks.get(nk);
-            if (nb != null) {
-                nb.buildMeshData(this::getBlockGlobal);
-                nb.uploadMesh();
-                if (nb.stagedVertices != null && nb.stagedIndices != null) {
-                    physics.addChunkMesh(nk, nb.stagedVertices, nb.stagedIndices);
-                }
-                rebuilt++;
-            }
         }
 
         // Queue new chunks for background generation
         for (int dx = -LOAD_RADIUS_XZ; dx <= LOAD_RADIUS_XZ; dx++) {
             for (int dy = -LOAD_RADIUS_Y; dy <= LOAD_RADIUS_Y; dy++) {
                 for (int dz = -LOAD_RADIUS_XZ; dz <= LOAD_RADIUS_XZ; dz++) {
-                    if (dx*dx + dy*dy + dz*dz > LOAD_RADIUS_XZ*LOAD_RADIUS_XZ) continue;
                     int cx = playerChunkX + dx;
                     int cy = playerChunkY + dy;
                     int cz = playerChunkZ + dz;
@@ -336,10 +304,8 @@ public class Main {
             int dx = c.chunkX - playerChunkX;
             int dy = c.chunkY - playerChunkY;
             int dz = c.chunkZ - playerChunkZ;
-            // Sphere check for unloading
-            if (dx*dx + dy*dy + dz*dz > UNLOAD_RADIUS * UNLOAD_RADIUS) {
+            if (Math.abs(dx) > UNLOAD_RADIUS || Math.abs(dy) > UNLOAD_RADIUS || Math.abs(dz) > UNLOAD_RADIUS) {
                 c.cleanup();
-                physics.removeChunkMesh(entry.getKey());
                 it.remove();
             }
         }
@@ -382,7 +348,7 @@ public class Main {
         camera.setFov(Config.BASE_FOV);
 
         // Dynamic chunk loading - start with empty map, chunks load on background thread!
-        worldChunks = new ConcurrentHashMap<>();
+        worldChunks = new HashMap<>();
 
         // Pre-generate spawn area SYNCHRONOUSLY so ground exists before player falls!
         System.out.println("Pre-generating spawn chunks...");
@@ -394,11 +360,8 @@ public class Main {
                     if (!worldChunks.containsKey(key)) {
                         Chunk chunk = new Chunk(dx, cy, dz);
                         chunk.generateTerrain();
-                        chunk.buildMeshData(this::getBlockGlobal);
+                        chunk.buildMeshData();
                         chunk.uploadMesh(); // Direct GPU upload on main thread
-                        if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
-                            physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
-                        }
                         worldChunks.put(key, chunk);
                         chunksLoading.add(key);
                     }
@@ -431,12 +394,11 @@ public class Main {
                                 int cx = pcx + dx;
                                 int cy = pcy + dy;
                                 int cz = pcz + dz;
-                                if (dx*dx + dy*dy + dz*dz > LOAD_RADIUS_XZ*LOAD_RADIUS_XZ) continue;
                                 long key = packChunkKey(cx, cy, cz);
                                 if (!worldChunks.containsKey(key) && chunksLoading.add(key)) {
                                     Chunk chunk = new Chunk(cx, cy, cz);
                                     chunk.generateTerrain();
-                                    chunk.buildMeshData(this::getBlockGlobal); // CPU only - no GL!
+                                    chunk.buildMeshData(); // CPU only - no GL!
                                     chunksToUpload.add(chunk);
                                     didWork = true;
                                 }
@@ -467,11 +429,8 @@ public class Main {
         
         long globalTicks = 0;
         float tickAccumulator = 0.0f;
-        final float TICK_RATE = 60.0f;
+        final float TICK_RATE = 20.0f; // Standard 20 Ticks Per Second
         final float TIME_PER_TICK = 1.0f / TICK_RATE;
-        int ticksThisSecond = 0;
-        float tpsTimer = 0.0f;
-        int tps = 0;
 
         while (!glfwWindowShouldClose(window) && !shouldExit) {
             float currentTime = (float) glfwGetTime();
@@ -485,33 +444,26 @@ public class Main {
                 needsCursorLock = false;
             }
 
-            // --- FIXED UPDATE TICK LOOP (60 TPS) ---
+            // --- FIXED UPDATE TICK LOOP (20 TPS) ---
             tickAccumulator += rawDt;
-            if (tickAccumulator > 0.25f) tickAccumulator = 0.25f;
             while (tickAccumulator >= TIME_PER_TICK) {
                 globalTicks++;
-                ticksThisSecond++;
                 tickAccumulator -= TIME_PER_TICK;
                 
+                // Dynamic chunk loading/unloading every tick
+                updateChunks();
+                
                 if (!isPaused) {
+                    // Universal Tick-Based State Physics
+                    // We universally pass TIME_PER_TICK (0.05f) instead of variable dt!
                     handleInput(TIME_PER_TICK);
                     updateRaycast();
-                    physics.stepSimulation(TIME_PER_TICK);
                 }
             }
             
-            // Chunk management once per render frame
-            updateChunks();
-
-            tpsTimer += rawDt;
-            if (tpsTimer >= 1.0f) {
-                tps = ticksThisSecond;
-                ticksThisSecond = 0;
-                tpsTimer = 0.0f;
-            }
-            
             // Map globalTicks proportionally to the day cycle angle!
-            float dayTime = 1.0f + (globalTicks * 0.00167f);
+            // Instead of passing seconds, we pass 0.005 radians per exact tick.
+            float dayTime = 1.0f + (globalTicks * 0.005f);
 
             frameCount++;
             fpsTimer += rawDt;
@@ -537,23 +489,13 @@ public class Main {
             float skyB = 0.08f + 0.92f * dayFactor;
 
             // 2. Render
-        int[] width = new int[1], height = new int[1];
-        glfwGetFramebufferSize(window, width, height);
-        glViewport(0, 0, width[0], height[0]);
-
-        byte camBlock = getBlockGlobal((int)Math.floor(camera.position.x), (int)Math.floor(camera.position.y), (int)Math.floor(camera.position.z));
-        boolean blind = (camBlock != 0 && camBlock != Chunk.WATER);
-
-        if (blind) {
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        } else {
+            int[] width = new int[1], height = new int[1];
+            glfwGetFramebufferSize(window, width, height);
+            glViewport(0, 0, width[0], height[0]);
             glClearColor(skyR, skyG, skyB, 1.0f);
-        }
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        float aspect = width[0] == 0 ? 1 : (float) width[0] / (float) height[0];
-
-        if (!blind) {
+            float aspect = width[0] == 0 ? 1 : (float) width[0] / (float) height[0];
 
             // --- Draw Sun and Moon as simple circles ---
             glDisable(GL_DEPTH_TEST);
@@ -578,26 +520,17 @@ public class Main {
             skyShader.unbind();
             glEnable(GL_DEPTH_TEST);
 
-        // --- Draw Chunks (flat color, no lighting) ---
-        shader.bind();
-        shader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
-        shader.setUniform("viewMatrix", camera.getViewMatrix());
-        shader.setUniform("modelMatrix", new org.joml.Matrix4f().identity());
+            // --- Draw Chunks (flat color, no lighting) ---
+            shader.bind();
+            shader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
+            shader.setUniform("viewMatrix", camera.getViewMatrix());
+            shader.setUniform("modelMatrix", new org.joml.Matrix4f().identity());
 
-        org.joml.Matrix4f viewProj = new org.joml.Matrix4f(camera.getProjectionMatrix(aspect)).mul(camera.getViewMatrix());
-        org.joml.FrustumIntersection frustum = new org.joml.FrustumIntersection(viewProj);
-
-        for (Chunk chunk : worldChunks.values()) {
-            float cx = chunk.chunkX * Chunk.CHUNK_SIZE;
-            float cy = chunk.chunkY * Chunk.CHUNK_SIZE;
-            float cz = chunk.chunkZ * Chunk.CHUNK_SIZE;
-            float s = Chunk.CHUNK_SIZE;
-            if (frustum.testAab(cx, cy, cz, cx + s, cy + s, cz + s)) {
+            for (Chunk chunk : worldChunks.values()) {
                 chunk.render();
             }
-        }
 
-        shader.unbind();
+            shader.unbind();
 
             // Draw Block Highlight in the 3D world!
             if (hasSelection) {
@@ -689,11 +622,9 @@ public class Main {
                 glDisable(GL_BLEND);
             }
 
-        } // end if (!blind)
+            drawChunkGrid(aspect);
 
-        drawChunkGrid(aspect);
-
-        // Draw Crosshair using simple Ortho compatibility pass
+            // Draw Crosshair using simple Ortho compatibility pass
             int[] wWidth = new int[1], wHeight = new int[1];
             glfwGetFramebufferSize(window, wWidth, wHeight);
 
@@ -725,8 +656,8 @@ public class Main {
 
             // Update Window Title with Velocity and Pos
             String title = String.format(
-                    "Java 3D Voxel Engine | FPS: %d | TPS: %d | Vel: %.2f, %.2f, %.2f | Pos: X:%.1f Y:%.1f Z:%.1f",
-                    fps, tps, velocityX, velocityY, velocityZ, camera.position.x, camera.position.y, camera.position.z);
+                    "Java 3D Voxel Engine | FPS: %d | Vel: %.2f, %.2f, %.2f | Pos: X:%.1f Y:%.1f Z:%.1f",
+                    fps, velocityX, velocityY, velocityZ, camera.position.x, camera.position.y, camera.position.z);
             glfwSetWindowTitle(window, title);
 
             glfwSwapBuffers(window);
@@ -734,24 +665,13 @@ public class Main {
         }
     }
 
-    private void rebuildChunkAndNeighbors(Chunk c) {
-        c.buildMesh(this::getBlockGlobal);
-        int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-        for (int[] d : dirs) {
-            Chunk nb = worldChunks.get(packChunkKey(c.chunkX+d[0], c.chunkY+d[1], c.chunkZ+d[2]));
-            if (nb != null) nb.buildMesh(this::getBlockGlobal);
-        }
-    }
-
-    public void breakBlock() {
-        if (!hasSelection) return;
+    private void breakBlock() {
+        if (!hasSelection)
+            return;
         Chunk c = setBlockGlobal(selectedBlockX, selectedBlockY, selectedBlockZ, (byte) 0);
         if (c != null) {
             AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".ogg", 1.0f, 1.0f);
-            rebuildChunkAndNeighbors(c);
-            
-            // JBullet Limit Tester!
-            physics.spawnDebris(selectedBlockX, selectedBlockY, selectedBlockZ);
+            c.buildMesh();
         }
     }
 
@@ -785,17 +705,13 @@ public class Main {
             Chunk c = setBlockGlobal(placeX, placeY, placeZ, selectedBlockType);
             if (c != null) {
                 AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".ogg", 1.0f, 1.0f);
-                rebuildChunkAndNeighbors(c);
+                c.buildMesh();
             }
         }
     }
 
     private void handleInput(float dt) {
-        // Break every tick when held - no cooldown!
-        if (isLeftMouseDown) {
-            breakBlock();
-        }
-
+        if (isLeftMouseDown) breakBlock();
         if (isRightMouseDown) {
             rightMouseTimer -= dt;
             if (rightMouseTimer <= 0.0f) {
@@ -804,26 +720,12 @@ public class Main {
             }
         }
 
-        boolean isCrouching = keys[GLFW_KEY_LEFT_SHIFT];
+        if (!keys[GLFW_KEY_W]) isSprintingState = false;
+        if (keys[GLFW_KEY_LEFT_CONTROL] && keys[GLFW_KEY_W]) isSprintingState = true;
 
-        // Let the player maintain their sprint through a jump!
-        if (!keys[GLFW_KEY_W] || isCrouching) {
-            isSprintingState = false;
-        }
-        if (keys[GLFW_KEY_LEFT_CONTROL] && keys[GLFW_KEY_W]) {
-            isSprintingState = true;
-        }
+        float targetSpeed = isSprintingState ? Config.SPRINT_SPEED : Config.BASE_SPEED;
 
-        float targetSpeed = Config.BASE_SPEED;
-        if (isCrouching) {
-            targetSpeed = Config.BASE_SPEED * Config.CROUCH_SPEED_MULT;
-        } else if (isSprintingState) {
-            targetSpeed = Config.SPRINT_SPEED;
-        }
-
-        // Horizontal Movement logic
         float rawDx = 0, rawDz = 0;
-
         if (keys[GLFW_KEY_W]) {
             rawDx += (float) Math.sin(Math.toRadians(camera.yaw));
             rawDz -= (float) Math.cos(Math.toRadians(camera.yaw));
@@ -841,7 +743,6 @@ public class Main {
             rawDz -= (float) Math.cos(Math.toRadians(camera.yaw + 90));
         }
 
-        // Normalize direction vector to prevent faster diagonal movement
         float length = (float) Math.sqrt(rawDx * rawDx + rawDz * rawDz);
         if (length > 0) {
             velocityX = (rawDx / length) * targetSpeed;
@@ -851,144 +752,57 @@ public class Main {
             velocityZ = 0;
         }
 
-        // Smoothly interpolate FOV based on actual horizontal velocity
         float targetFov = isSprintingState ? Config.SPRINT_FOV : Config.BASE_FOV;
         currentFov += (targetFov - currentFov) * Config.FOV_TRANSITION_SPEED * dt;
         camera.setFov(currentFov);
 
-        float dx = velocityX * dt;
-        float dz = velocityZ * dt;
+        camera.position.x += velocityX * dt;
+        camera.position.z += velocityZ * dt;
 
-        // Gravity
+        // Simplified Gravity/Y movement
         velocityY -= Config.GRAVITY * dt;
         boolean isJumpPressed = keys[GLFW_KEY_SPACE] || (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-        if (isJumpPressed && isGrounded) {
-            velocityY = Config.JUMP_VELOCITY;
-            isGrounded = false;
-        }
-        float dy = velocityY * dt;
-
-        float ph = isCrouching ? 1.5f : 1.61f; // Player fixed height golden ratio
-
-        // Prevent feet from snapping up/down by adjusting eye position to compensate
-        // for height change
-        if (isCrouching && !wasCrouching) {
-            camera.position.y -= (1.61f - 1.5f);
-        } else if (!isCrouching && wasCrouching) {
-            camera.position.y += (1.61f - 1.5f);
-        }
-        wasCrouching = isCrouching;
-
-        // AABB parameters
-        float pRadiusX = 0.3f; // Player half-width
-        float pRadiusZ = 0.3f; // Player half-depth
-        float pHeight = ph; // Player height
-        float pEyeY = 0.18f; // Camera offset above feet
-
-        // --- 1. Move X ---
-        float nextX = camera.position.x + dx;
-        float minX = nextX - pRadiusX;
-        float maxX = nextX + pRadiusX;
-        float minY = camera.position.y - pHeight;
-        float maxY = camera.position.y + pEyeY;
-        float minZ = camera.position.z - pRadiusZ;
-        float maxZ = camera.position.z + pRadiusZ;
-
-        boolean collisionX = false;
-        for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
-            for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
-                for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
-                        collisionX = true;
-                }
-            }
-        }
-        // Crouch Edge Detection
-        if (!collisionX && isCrouching && isGrounded) {
-            if (!isSupportedAt(nextX, camera.position.z, camera.position.y, pRadiusX, pRadiusZ, pHeight)) {
-                collisionX = true;
-                dx = 0; // Prevent pushing mathematically
-            }
-        }
-
-        if (collisionX) {
-            if (dx > 0) { // Moving positive X, hit left face of block
-                camera.position.x = (float) Math.floor(maxX) - pRadiusX - 0.001f;
-            } else if (dx < 0) { // Moving negative X, hit right face of block
-                camera.position.x = (float) Math.floor(minX) + 1.0f + pRadiusX + 0.001f;
-            }
-            velocityX = 0;
-        } else {
-            camera.position.x = nextX;
-        }
-
-        // --- 2. Move Y ---
-        float nextY = camera.position.y + dy;
-        minX = camera.position.x - pRadiusX; // Update with resolved X
-        maxX = camera.position.x + pRadiusX;
-        minY = nextY - pHeight;
-        maxY = nextY + pEyeY;
-        minZ = camera.position.z - pRadiusZ; // Z is still original
-        maxZ = camera.position.z + pRadiusZ;
-
+        
+        float pRadiusX = 0.3f;
+        float pRadiusZ = 0.3f;
+        float pHeight = 1.61f; // Fixed height golden ratio
+        
+        float nextY = camera.position.y + (velocityY * dt);
         boolean collisionY = false;
         isGrounded = false;
+        
+        float minX = camera.position.x - pRadiusX;
+        float maxX = camera.position.x + pRadiusX;
+        float minY = nextY - pHeight;
+        float maxY = nextY + 0.18f;
+        float minZ = camera.position.z - pRadiusZ;
+        float maxZ = camera.position.z + pRadiusZ;
+        
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
                 for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
-                        collisionY = true;
+                    if (getBlockGlobal(x, y, z) != 0) collisionY = true;
                 }
             }
         }
+        
         if (collisionY) {
-            if (dy < 0) { // Falling, hit top of block
+            if (velocityY < 0) {
                 camera.position.y = (float) Math.floor(minY) + 1.0f + pHeight + 0.001f;
                 isGrounded = true;
-            } else if (dy > 0) { // Jumping, hit bottom of block
-                camera.position.y = (float) Math.floor(maxY) - pEyeY - 0.001f;
+            } else if (velocityY > 0) {
+                camera.position.y = (float) Math.floor(maxY) - 0.18f - 0.001f;
             }
             velocityY = 0;
         } else {
             camera.position.y = nextY;
         }
 
-        // --- 3. Move Z ---
-        float nextZ = camera.position.z + dz;
-        minX = camera.position.x - pRadiusX; // Resolved X
-        maxX = camera.position.x + pRadiusX;
-        minY = camera.position.y - pHeight; // Resolved Y
-        maxY = camera.position.y + pEyeY;
-        minZ = nextZ - pRadiusZ;
-        maxZ = nextZ + pRadiusZ;
-
-        boolean collisionZ = false;
-        for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
-            for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
-                for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
-                        collisionZ = true;
-                }
-            }
+        if (isJumpPressed && isGrounded) {
+            velocityY = Config.JUMP_VELOCITY;
+            isGrounded = false;
         }
-        // Crouch Edge Detection
-        if (!collisionZ && isCrouching && isGrounded) {
-            if (!isSupportedAt(camera.position.x, nextZ, camera.position.y, pRadiusX, pRadiusZ, pHeight)) {
-                collisionZ = true;
-                dz = 0;
-            }
-        }
-
-        if (collisionZ) {
-            if (dz > 0) { // Moving positive Z, hit front face of block
-                camera.position.z = (float) Math.floor(maxZ) - pRadiusZ - 0.001f;
-            } else if (dz < 0) { // Moving negative Z, hit back face of block
-                camera.position.z = (float) Math.floor(minZ) + 1.0f + pRadiusZ + 0.001f;
-            }
-            velocityZ = 0;
-        } else {
-            camera.position.z = nextZ;
-        }
+    }
     }
 
     private void drawCelestialBody(org.joml.Vector3f pos, org.joml.Vector3f dir, float size) {
@@ -1070,9 +884,9 @@ public class Main {
 
         int normX = 0, normY = 0, normZ = 0;
 
-        for (int i = 0; i < 5000; i++) { // Max reach basically infinite
+        for (int i = 0; i < 50; i++) { // Max reach 5.0 blocks (if tDelta is roughly 0.1)
             float dist = (float) Math.sqrt(Math.pow(x - px, 2) + Math.pow(y - py, 2) + Math.pow(z - pz, 2));
-            if (dist > 1000.0f)
+            if (dist > 6.0f)
                 break; // Maximum reach
 
             if (getBlockGlobal(x, y, z) != 0) {
