@@ -1,4 +1,4 @@
-#version 330 core
+#version 460 compatibility
 in vec2 TexCoord;
 out vec4 FragColor;
 uniform vec3 bodyColor;

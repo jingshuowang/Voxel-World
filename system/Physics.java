@@ -31,8 +31,13 @@ public class Physics {
     public static class Debris {
         public RigidBody body;
         public float life;
-        public Debris(RigidBody b, float l) { body=b; life=l; }
+
+        public Debris(RigidBody b, float l) {
+            body = b;
+            life = l;
+        }
     }
+
     public List<Debris> activeDebris = new ArrayList<>();
 
     public Physics() {
@@ -58,7 +63,8 @@ public class Physics {
         playerShape.calculateLocalInertia(mass, localInertia);
 
         DefaultMotionState myMotionState = new DefaultMotionState(startTransform);
-        RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(mass, myMotionState, playerShape, localInertia);
+        RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(mass, myMotionState, playerShape,
+                localInertia);
         playerBody = new RigidBody(rbInfo);
 
         // Prevent angular rotation so camera doesn't fall over
@@ -74,8 +80,9 @@ public class Physics {
             dynamicsWorld.removeRigidBody(chunkBodies.get(key));
             chunkBodies.remove(key);
         }
-        
-        if (stagedVertices == null || stagedIndices == null || stagedIndices.length == 0) return;
+
+        if (stagedVertices == null || stagedIndices == null || stagedIndices.length == 0)
+            return;
 
         int numTriangles = stagedIndices.length / 3;
         int numVertices = stagedVertices.length / 12;
@@ -107,10 +114,11 @@ public class Physics {
         Transform transform = new Transform();
         transform.setIdentity();
 
-        RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(0.0f, new DefaultMotionState(transform), shape, new Vector3f(0, 0, 0));
+        RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(0.0f, new DefaultMotionState(transform), shape,
+                new Vector3f(0, 0, 0));
         RigidBody body = new RigidBody(rbInfo);
         body.setFriction(1.0f); // Ground grip
-        
+
         dynamicsWorld.addRigidBody(body);
         chunkBodies.put(key, body);
     }
@@ -122,7 +130,41 @@ public class Physics {
         }
     }
 
+    public void shootBullet(float x, float y, float z, float dx, float dy, float dz) {
+        BoxShape boxShape = new BoxShape(new Vector3f(0.08f, 0.08f, 0.08f));
+        Transform startTransform = new Transform();
+        startTransform.setIdentity();
+        // Spawn right at the eye piece and push it forward
+        startTransform.origin.set(x + (dx * 0.5f), y + 0.18f + (dy * 0.5f), z + (dz * 0.5f));
+
+        float mass = 15.0f; // Heavy bullet
+        Vector3f localInertia = new Vector3f(0, 0, 0);
+        boxShape.calculateLocalInertia(mass, localInertia);
+
+        DefaultMotionState myMotionState = new DefaultMotionState(startTransform);
+        RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(mass, myMotionState, boxShape, localInertia);
+        RigidBody body = new RigidBody(rbInfo);
+
+        float speed = 80.0f;
+        body.setLinearVelocity(new Vector3f(dx * speed, dy * speed, dz * speed));
+        body.setRestitution(0.1f); // low bounce
+
+        dynamicsWorld.addRigidBody(body);
+        activeDebris.add(new Debris(body, 6.0f)); // Give bullets 6 seconds to fly/fall
+    }
+
     public void stepSimulation(float dt) {
         dynamicsWorld.stepSimulation(dt, 10);
+
+        // Clean up debris
+        Iterator<Debris> it = activeDebris.iterator();
+        while (it.hasNext()) {
+            Debris d = it.next();
+            d.life -= dt;
+            if (d.life <= 0) {
+                dynamicsWorld.removeRigidBody(d.body);
+                it.remove();
+            }
+        }
     }
 }

@@ -17,6 +17,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -37,13 +38,21 @@ public class Main {
     private Shader skyShader;
     private Shader depthShader;
     private Camera camera;
-    
+
     private int whiteTextureId; // Procedural 1x1 white pixel (no image files needed)
     private Map<Long, Chunk> worldChunks;
-    private static final int LOAD_RADIUS_XZ = 8;
-    private static final int LOAD_RADIUS_Y = 64; // 64 chunks up, 64 chunks down
-    private static final int UNLOAD_RADIUS = 12; // Unload distance usually larger than LOAD_RADIUS_XZ
-    
+    private static final int LOAD_RADIUS_XZ = 10;
+    private static final int LOAD_RADIUS_Y = 16; // 16 chunks vertical (256 blocks up and down)
+    private static final int UNLOAD_RADIUS_XZ = 14; // XZ unload distance
+    private static final int UNLOAD_RADIUS_Y = 20; // Y unload distance
+    private static final int WORLD_HEIGHT_BLOCKS = 16384;
+    private static final int WORLD_HEIGHT_CHUNKS = WORLD_HEIGHT_BLOCKS / Chunk.CHUNK_SIZE;
+    private static final int XZ_BLOCK_BITS = 24;
+    private static final int XZ_CHUNK_BITS = XZ_BLOCK_BITS - 4;
+    private static final int Y_CHUNK_BITS = 10;
+    private static final long XZ_CHUNK_MASK = (1L << XZ_CHUNK_BITS) - 1L;
+    private static final long Y_CHUNK_MASK = (1L << Y_CHUNK_BITS) - 1L;
+
     // Background chunk generation thread
     private final ConcurrentLinkedQueue<Chunk> chunksToUpload = new ConcurrentLinkedQueue<>();
     private final Set<Long> chunksLoading = java.util.Collections.synchronizedSet(new HashSet<>());
@@ -71,7 +80,9 @@ public class Main {
     private volatile boolean shouldExit = false;
     private volatile boolean needsCursorLock = false;
     private boolean isSprintingState = false;
-    private byte selectedBlockType = 2; // 1=grass-dirt, 2=stone, 3=water(blue)
+    private static final byte TOOL_PROJECTILE = (byte) 127;
+    private byte selectedBlockType = Chunk.STONE;
+    private int renderMode = 0; // 0=normal, 1=normals, 2=depth
 
     // Mouse Auto-Fire Timers
     private boolean isLeftMouseDown = false;
@@ -79,6 +90,24 @@ public class Main {
     private float leftMouseTimer = 0.0f;
     private float rightMouseTimer = 0.0f;
     private static final float MOUSE_HOLD_DELAY = 0.25f; // 5 game ticks at 20 ticks/sec
+
+    private static class Projectile {
+        float x, y, z;
+        float vx, vy, vz;
+        float life;
+    }
+
+    private static class CubeParticle {
+        float x, y, z;
+        float vx, vy, vz;
+        float life;
+        float size;
+        float r, g, b;
+    }
+
+    private final List<Projectile> activeProjectiles = new ArrayList<>();
+    private final List<CubeParticle> activeCubeParticles = new ArrayList<>();
+    private final Random rng = new Random();
 
     // Shaders have been completely extracted into Asset/shader/*.glsl equivalents
 
@@ -91,7 +120,10 @@ public class Main {
             shader.cleanup();
         chunkThreadRunning = false;
         if (chunkGenThread != null) {
-            try { chunkGenThread.join(1000); } catch (InterruptedException e) {}
+            try {
+                chunkGenThread.join(1000);
+            } catch (InterruptedException e) {
+            }
         }
         if (whiteTextureId != 0)
             glDeleteTextures(whiteTextureId);
@@ -113,6 +145,12 @@ public class Main {
             throw new IllegalStateException("Unable to initialize GLFW");
 
         glfwDefaultWindowHints();
+
+        // Request OpenGL 4.6 Compatibility Profile
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
@@ -178,9 +216,19 @@ public class Main {
                     isFullscreen = true;
                 }
             }
-            // Hotbar block selection
-            if (key == GLFW_KEY_1 && action == GLFW_PRESS) selectedBlockType = 2; // Stone
-            if (key == GLFW_KEY_2 && action == GLFW_PRESS) selectedBlockType = 3; // Water (blue block)
+            // Hotbar: 1=Water, 2=Dirt, 3=Stone, 4=Snow, 5=Projectile tool
+            if (key == GLFW_KEY_1 && action == GLFW_PRESS)
+                selectedBlockType = Chunk.WATER;
+            if (key == GLFW_KEY_2 && action == GLFW_PRESS)
+                selectedBlockType = Chunk.DIRT;
+            if (key == GLFW_KEY_3 && action == GLFW_PRESS)
+                selectedBlockType = Chunk.STONE;
+            if (key == GLFW_KEY_4 && action == GLFW_PRESS)
+                selectedBlockType = Chunk.SNOW;
+            if (key == GLFW_KEY_5 && action == GLFW_PRESS)
+                selectedBlockType = TOOL_PROJECTILE;
+            if (key == GLFW_KEY_F5 && action == GLFW_PRESS)
+                renderMode = (renderMode + 1) % 3; // Cycle: normal -> normals -> depth
             if (key >= 0 && key < GLFW_KEY_LAST) {
                 keys[key] = (action != GLFW_RELEASE);
             }
@@ -230,8 +278,8 @@ public class Main {
         glfwMakeContextCurrent(window);
         glfwSwapInterval(0); // Enable v-sync
         glfwShowWindow(window);
-        
-        physics = new Physics();
+
+        // physics = new Physics();
     }
 
     public Chunk setBlockGlobal(int x, int y, int z, byte type) {
@@ -264,32 +312,36 @@ public class Main {
     }
 
     private static long packChunkKey(int cx, int cy, int cz) {
-        // Pack 3 ints into a long to support massive worlds (2^24+ chunks horizontally)
-        // cx in bits 38-63 (26 bits), cz in bits 12-37 (26 bits), cy in bits 0-11 (12 bits)
-        return ((long)(cx & 0x3FFFFFF) << 38) | ((long)(cz & 0x3FFFFFF) << 12) | (cy & 0xFFF);
+        // Pack chunk coordinates using actual block-world limits.
+        // X/Z: 2^24 blocks per axis -> 2^20 chunk coordinates.
+        // Y: 16384 blocks -> 1024 chunk coordinates.
+        return ((cx & XZ_CHUNK_MASK) << (XZ_CHUNK_BITS + Y_CHUNK_BITS))
+                | ((cz & XZ_CHUNK_MASK) << Y_CHUNK_BITS)
+                | (cy & Y_CHUNK_MASK);
     }
 
     private void updateChunks() {
         int playerChunkX = (int) Math.floor(camera.position.x / 16.0f);
-        int playerChunkY = (int) Math.floor(camera.position.y / 16.0f);
         int playerChunkZ = (int) Math.floor(camera.position.z / 16.0f);
 
-        // Upload chunks that the background thread has finished generating (max 8 per frame)
+        // Upload chunks that the background thread has finished generating (max 32 per
+        // frame)
         int uploaded = 0;
-        while (uploaded < 8) {
+        while (uploaded < 96) {
             Chunk chunk = chunksToUpload.poll();
-            if (chunk == null) break;
+            if (chunk == null)
+                break;
             chunk.uploadMesh();
             long key = packChunkKey(chunk.chunkX, chunk.chunkY, chunk.chunkZ);
             worldChunks.put(key, chunk);
-            if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
-                physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
-            }
+            // if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
+            // physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
+            // }
             chunksLoading.remove(key);
             // Queue neighbors for deferred rebuild
-            int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+            int[][] dirs = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
             for (int[] d : dirs) {
-                long nk = packChunkKey(chunk.chunkX+d[0], chunk.chunkY+d[1], chunk.chunkZ+d[2]);
+                long nk = packChunkKey(chunk.chunkX + d[0], chunk.chunkY + d[1], chunk.chunkZ + d[2]);
                 if (worldChunks.containsKey(nk)) {
                     chunksNeedingRebuild.add(nk);
                 }
@@ -305,41 +357,24 @@ public class Main {
             if (nb != null) {
                 nb.buildMeshData(this::getBlockGlobal);
                 nb.uploadMesh();
-                if (nb.stagedVertices != null && nb.stagedIndices != null) {
-                    physics.addChunkMesh(nk, nb.stagedVertices, nb.stagedIndices);
-                }
+                // if (nb.stagedVertices != null && nb.stagedIndices != null) {
+                // physics.addChunkMesh(nk, nb.stagedVertices, nb.stagedIndices);
+                // }
                 rebuilt++;
             }
         }
 
-        // Queue new chunks for background generation
-        for (int dx = -LOAD_RADIUS_XZ; dx <= LOAD_RADIUS_XZ; dx++) {
-            for (int dy = -LOAD_RADIUS_Y; dy <= LOAD_RADIUS_Y; dy++) {
-                for (int dz = -LOAD_RADIUS_XZ; dz <= LOAD_RADIUS_XZ; dz++) {
-                    if (dx*dx + dy*dy + dz*dz > LOAD_RADIUS_XZ*LOAD_RADIUS_XZ) continue;
-                    int cx = playerChunkX + dx;
-                    int cy = playerChunkY + dy;
-                    int cz = playerChunkZ + dz;
-                    long key = packChunkKey(cx, cy, cz);
-                    if (!worldChunks.containsKey(key) && !chunksLoading.contains(key)) {
-                        chunksLoading.add(key);
-                    }
-                }
-            }
-        }
-
-        // Unload far chunks
+        // Unload far chunks (cylindrical distance)
         Iterator<Map.Entry<Long, Chunk>> it = worldChunks.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<Long, Chunk> entry = it.next();
             Chunk c = entry.getValue();
             int dx = c.chunkX - playerChunkX;
-            int dy = c.chunkY - playerChunkY;
             int dz = c.chunkZ - playerChunkZ;
-            // Sphere check for unloading
-            if (dx*dx + dy*dy + dz*dz > UNLOAD_RADIUS * UNLOAD_RADIUS) {
+            if (dx * dx + dz * dz > UNLOAD_RADIUS_XZ * UNLOAD_RADIUS_XZ || c.chunkY < 0
+                    || c.chunkY >= WORLD_HEIGHT_CHUNKS) {
                 c.cleanup();
-                physics.removeChunkMesh(entry.getKey());
+                // physics.removeChunkMesh(entry.getKey());
                 it.remove();
             }
         }
@@ -349,9 +384,11 @@ public class Main {
         GL.createCapabilities();
         glClearColor(0.5f, 0.8f, 1.0f, 0.0f); // Sky blue
         glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_GEQUAL);  // Reversed-Z: greater = closer
-        glClearDepth(0.0);       // Clear to 0 (farthest in reversed-Z)
-        glEnable(GL_CULL_FACE);  // Cull back faces for performance
+        glDepthFunc(GL_GEQUAL); // Reversed-Z: greater = closer
+        glClearDepth(0.0); // Clear to 0 (farthest in reversed-Z)
+        glEnable(GL_CULL_FACE); // Cull back faces for performance
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         try {
             shader = new Shader();
@@ -368,7 +405,7 @@ public class Main {
             int whiteTexId = glGenTextures();
             glBindTexture(GL_TEXTURE_2D, whiteTexId);
             ByteBuffer pixel = ByteBuffer.allocateDirect(4);
-            pixel.put((byte)0xFF).put((byte)0xFF).put((byte)0xFF).put((byte)0xFF).flip();
+            pixel.put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF).flip();
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -381,26 +418,28 @@ public class Main {
         camera = new Camera();
         camera.setFov(Config.BASE_FOV);
 
-        // Dynamic chunk loading - start with empty map, chunks load on background thread!
+        // Dynamic chunk loading - start with empty map, chunks load on background
+        // thread!
         worldChunks = new ConcurrentHashMap<>();
 
         // Pre-generate spawn area SYNCHRONOUSLY so ground exists before player falls!
         System.out.println("Pre-generating spawn chunks...");
-        int spawnRadius = 2; // 5x5 column area around spawn
+        int spawnRadius = LOAD_RADIUS_XZ; // Full view distance at spawn
         for (int dx = -spawnRadius; dx <= spawnRadius; dx++) {
             for (int dz = -spawnRadius; dz <= spawnRadius; dz++) {
-                for (int cy = 0; cy < LOAD_RADIUS_Y; cy++) {
+                if (dx * dx + dz * dz > spawnRadius * spawnRadius)
+                    continue;
+                for (int cy = 0; cy <= LOAD_RADIUS_Y; cy++) {
                     long key = packChunkKey(dx, cy, dz);
                     if (!worldChunks.containsKey(key)) {
                         Chunk chunk = new Chunk(dx, cy, dz);
                         chunk.generateTerrain();
                         chunk.buildMeshData(this::getBlockGlobal);
                         chunk.uploadMesh(); // Direct GPU upload on main thread
-                        if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
-                            physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
-                        }
+                        // if (chunk.stagedVertices != null && chunk.stagedIndices != null) {
+                        // physics.addChunkMesh(key, chunk.stagedVertices, chunk.stagedIndices);
+                        // }
                         worldChunks.put(key, chunk);
-                        chunksLoading.add(key);
                     }
                 }
             }
@@ -411,42 +450,46 @@ public class Main {
         int spawnTerrainY = Chunk.getTerrainHeight(0, 0);
         camera.position.set(0, spawnTerrainY + 2.5f, 0);
         System.out.println("Dynamic chunk loading enabled (radius: " + LOAD_RADIUS_XZ + " chunks)");
-        
+
         // Start background chunk generation thread
         chunkGenThread = new Thread(() -> {
             System.out.println("[ChunkGen] Background thread started!");
             while (chunkThreadRunning) {
                 int pcx = (int) Math.floor(camera.position.x / 16.0f);
-                int pcy = (int) Math.floor(camera.position.y / 16.0f);
                 int pcz = (int) Math.floor(camera.position.z / 16.0f);
-                
-                boolean didWork = false;
-                // Spiral outward from player for nearest-first loading
-                for (int r = 0; r <= LOAD_RADIUS_XZ && !didWork; r++) {
-                    for (int dx = -r; dx <= r && !didWork; dx++) {
-                        for (int dy = -Math.min(r, LOAD_RADIUS_Y); dy <= Math.min(r, LOAD_RADIUS_Y) && !didWork; dy++) {
-                            for (int dz = -r; dz <= r && !didWork; dz++) {
-                                if (Math.abs(dx) != r && Math.abs(dy) != Math.min(r, LOAD_RADIUS_Y) && Math.abs(dz) != r)
-                                    continue; // Only check the shell at this radius
-                                int cx = pcx + dx;
-                                int cy = pcy + dy;
-                                int cz = pcz + dz;
-                                if (dx*dx + dy*dy + dz*dz > LOAD_RADIUS_XZ*LOAD_RADIUS_XZ) continue;
-                                long key = packChunkKey(cx, cy, cz);
+
+                int generated = 0;
+                // Spiral outward from player for nearest-first loading (XZ only)
+                for (int r = 0; r <= LOAD_RADIUS_XZ && generated < 96; r++) {
+                    for (int dx = -r; dx <= r && generated < 96; dx++) {
+                        for (int dz = -r; dz <= r && generated < 96; dz++) {
+                            if (Math.abs(dx) != r && Math.abs(dz) != r)
+                                continue;
+                            if (dx * dx + dz * dz > LOAD_RADIUS_XZ * LOAD_RADIUS_XZ)
+                                continue;
+                            // Generate full column of Y chunks
+                            for (int cy = 0; cy <= LOAD_RADIUS_Y; cy++) {
+                                int wx = pcx + dx;
+                                int wz = pcz + dz;
+                                long key = packChunkKey(wx, cy, wz);
                                 if (!worldChunks.containsKey(key) && chunksLoading.add(key)) {
-                                    Chunk chunk = new Chunk(cx, cy, cz);
+                                    Chunk chunk = new Chunk(wx, cy, wz);
                                     chunk.generateTerrain();
-                                    chunk.buildMeshData(this::getBlockGlobal); // CPU only - no GL!
+                                    chunk.buildMeshData(this::getBlockGlobal);
                                     chunksToUpload.add(chunk);
-                                    didWork = true;
+                                    generated++;
                                 }
                             }
                         }
                     }
                 }
-                
-                if (!didWork) {
-                    try { Thread.sleep(50); } catch (InterruptedException e) { break; }
+
+                if (generated == 0) {
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
                 }
             }
             System.out.println("[ChunkGen] Background thread stopped.");
@@ -455,16 +498,16 @@ public class Main {
         chunkGenThread.start();
 
         System.out.println("Preloading Audio to RAM...");
-        AudioPlayer.preloadSound("Asset/sound/block1.ogg");
-        AudioPlayer.preloadSound("Asset/sound/block2.ogg");
-        AudioPlayer.preloadSound("Asset/sound/block3.ogg");
-        AudioPlayer.preloadSound("Asset/sound/block4.ogg");
+        AudioPlayer.preloadSound("Asset/sound/block1.wav");
+        AudioPlayer.preloadSound("Asset/sound/block2.wav");
+        AudioPlayer.preloadSound("Asset/sound/block3.wav");
+        AudioPlayer.preloadSound("Asset/sound/block4.wav");
 
         float lastTime = (float) glfwGetTime();
         int frameCount = 0;
         float fpsTimer = 0.0f;
         int fps = 0;
-        
+
         long globalTicks = 0;
         float tickAccumulator = 0.0f;
         final float TICK_RATE = 60.0f;
@@ -487,19 +530,21 @@ public class Main {
 
             // --- FIXED UPDATE TICK LOOP (60 TPS) ---
             tickAccumulator += rawDt;
-            if (tickAccumulator > 0.25f) tickAccumulator = 0.25f;
+            if (tickAccumulator > 0.25f)
+                tickAccumulator = 0.25f;
             while (tickAccumulator >= TIME_PER_TICK) {
                 globalTicks++;
                 ticksThisSecond++;
                 tickAccumulator -= TIME_PER_TICK;
-                
+
                 if (!isPaused) {
                     handleInput(TIME_PER_TICK);
                     updateRaycast();
-                    physics.stepSimulation(TIME_PER_TICK);
+                    updateProjectiles(TIME_PER_TICK);
+                    // physics.stepSimulation(TIME_PER_TICK);
                 }
             }
-            
+
             // Chunk management once per render frame
             updateChunks();
 
@@ -509,7 +554,7 @@ public class Main {
                 ticksThisSecond = 0;
                 tpsTimer = 0.0f;
             }
-            
+
             // Map globalTicks proportionally to the day cycle angle!
             float dayTime = 1.0f + (globalTicks * 0.00167f);
 
@@ -537,163 +582,216 @@ public class Main {
             float skyB = 0.08f + 0.92f * dayFactor;
 
             // 2. Render
-        int[] width = new int[1], height = new int[1];
-        glfwGetFramebufferSize(window, width, height);
-        glViewport(0, 0, width[0], height[0]);
+            int[] width = new int[1], height = new int[1];
+            glfwGetFramebufferSize(window, width, height);
+            glViewport(0, 0, width[0], height[0]);
 
-        byte camBlock = getBlockGlobal((int)Math.floor(camera.position.x), (int)Math.floor(camera.position.y), (int)Math.floor(camera.position.z));
-        boolean blind = (camBlock != 0 && camBlock != Chunk.WATER);
+            byte camBlock = getBlockGlobal((int) Math.floor(camera.position.x), (int) Math.floor(camera.position.y),
+                    (int) Math.floor(camera.position.z));
+            boolean blind = (camBlock != 0 && camBlock != Chunk.WATER);
 
-        if (blind) {
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        } else {
-            glClearColor(skyR, skyG, skyB, 1.0f);
-        }
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        float aspect = width[0] == 0 ? 1 : (float) width[0] / (float) height[0];
-
-        if (!blind) {
-
-            // --- Draw Sun and Moon as simple circles ---
-            glDisable(GL_DEPTH_TEST);
-            skyShader.bind();
-            skyShader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
-            skyShader.setUniform("viewMatrix", camera.getViewMatrix());
-
-            // Sun - yellow circle
-            skyShader.setUniform("bodyColor", new org.joml.Vector3f(1.0f, 0.9f, 0.3f));
-            drawCelestialBody(sunPos, sunDir, 4000.0f);
-
-            // Moon - opposite side, blue-white circle
-            org.joml.Vector3f moonPos = new org.joml.Vector3f(
-                camera.position.x - (sunX - camera.position.x),
-                camera.position.y - (sunY - camera.position.y),
-                camera.position.z
-            );
-            org.joml.Vector3f moonDir = new org.joml.Vector3f(moonPos).sub(camera.position).normalize();
-            skyShader.setUniform("bodyColor", new org.joml.Vector3f(0.7f, 0.75f, 0.9f));
-            drawCelestialBody(moonPos, moonDir, 3000.0f);
-
-            skyShader.unbind();
-            glEnable(GL_DEPTH_TEST);
-
-        // --- Draw Chunks (flat color, no lighting) ---
-        shader.bind();
-        shader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
-        shader.setUniform("viewMatrix", camera.getViewMatrix());
-        shader.setUniform("modelMatrix", new org.joml.Matrix4f().identity());
-
-        org.joml.Matrix4f viewProj = new org.joml.Matrix4f(camera.getProjectionMatrix(aspect)).mul(camera.getViewMatrix());
-        org.joml.FrustumIntersection frustum = new org.joml.FrustumIntersection(viewProj);
-
-        for (Chunk chunk : worldChunks.values()) {
-            float cx = chunk.chunkX * Chunk.CHUNK_SIZE;
-            float cy = chunk.chunkY * Chunk.CHUNK_SIZE;
-            float cz = chunk.chunkZ * Chunk.CHUNK_SIZE;
-            float s = Chunk.CHUNK_SIZE;
-            if (frustum.testAab(cx, cy, cz, cx + s, cy + s, cz + s)) {
-                chunk.render();
+            if (blind) {
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            } else {
+                glClearColor(skyR, skyG, skyB, 1.0f);
             }
-        }
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        shader.unbind();
+            float aspect = width[0] == 0 ? 1 : (float) width[0] / (float) height[0];
 
-            // Draw Block Highlight in the 3D world!
-            if (hasSelection) {
-                glMatrixMode(GL_PROJECTION);
-                glLoadMatrixf(camera.getProjectionMatrix(aspect).get(new float[16]));
-                glMatrixMode(GL_MODELVIEW);
-                glLoadMatrixf(camera.getViewMatrix().get(new float[16]));
+            if (!blind) {
 
-                glDisable(GL_TEXTURE_2D);
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glLineWidth(3.0f);
+                // --- Draw Sun and Moon as simple circles ---
+                glDisable(GL_DEPTH_TEST);
+                skyShader.bind();
+                skyShader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
+                skyShader.setUniform("viewMatrix", camera.getViewMatrix());
 
-                float bx = selectedBlockX;
-                float by = selectedBlockY;
-                float bz = selectedBlockZ;
+                // Sun - yellow circle
+                skyShader.setUniform("bodyColor", new org.joml.Vector3f(1.0f, 0.9f, 0.3f));
+                drawCelestialBody(sunPos, sunDir, 4000.0f);
 
-                // Wireframe Box around block
-                glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Solid white line
-                float s = 1.002f; // Slightly larger to prevent Z-fighting
-                float o = -0.001f;
+                // Moon - opposite side, blue-white circle
+                org.joml.Vector3f moonPos = new org.joml.Vector3f(
+                        camera.position.x - (sunX - camera.position.x),
+                        camera.position.y - (sunY - camera.position.y),
+                        camera.position.z);
+                org.joml.Vector3f moonDir = new org.joml.Vector3f(moonPos).sub(camera.position).normalize();
+                skyShader.setUniform("bodyColor", new org.joml.Vector3f(0.7f, 0.75f, 0.9f));
+                drawCelestialBody(moonPos, moonDir, 3000.0f);
 
-                glBegin(GL_LINES);
-                // Bottom
-                glVertex3f(bx + o, by + o, bz + o);
-                glVertex3f(bx + o + s, by + o, bz + o);
-                glVertex3f(bx + o + s, by + o, bz + o);
-                glVertex3f(bx + o + s, by + o, bz + o + s);
-                glVertex3f(bx + o + s, by + o, bz + o + s);
-                glVertex3f(bx + o, by + o, bz + o + s);
-                glVertex3f(bx + o, by + o, bz + o + s);
-                glVertex3f(bx + o, by + o, bz + o);
-                // Top
-                glVertex3f(bx + o, by + o + s, bz + o);
-                glVertex3f(bx + o + s, by + o + s, bz + o);
-                glVertex3f(bx + o + s, by + o + s, bz + o);
-                glVertex3f(bx + o + s, by + o + s, bz + o + s);
-                glVertex3f(bx + o + s, by + o + s, bz + o + s);
-                glVertex3f(bx + o, by + o + s, bz + o + s);
-                glVertex3f(bx + o, by + o + s, bz + o + s);
-                glVertex3f(bx + o, by + o + s, bz + o);
-                // Verticals
-                glVertex3f(bx + o, by + o, bz + o);
-                glVertex3f(bx + o, by + o + s, bz + o);
-                glVertex3f(bx + o + s, by + o, bz + o);
-                glVertex3f(bx + o + s, by + o + s, bz + o);
-                glVertex3f(bx + o + s, by + o, bz + o + s);
-                glVertex3f(bx + o + s, by + o + s, bz + o + s);
-                glVertex3f(bx + o, by + o, bz + o + s);
-                glVertex3f(bx + o, by + o + s, bz + o + s);
-                glEnd();
+                skyShader.unbind();
+                glEnable(GL_DEPTH_TEST);
 
-                // Draw face highlight slightly transparent white
-                glColor4f(1.0f, 1.0f, 1.0f, 0.2f);
-                float ps = 1.003f; // Face overlay must be slightly more offset
-                glBegin(GL_QUADS);
-                if (selectedFaceNormalY == 1) { // Top
-                    glVertex3f(bx, by + ps, bz);
-                    glVertex3f(bx, by + ps, bz + 1);
-                    glVertex3f(bx + 1, by + ps, bz + 1);
-                    glVertex3f(bx + 1, by + ps, bz);
-                } else if (selectedFaceNormalY == -1) { // Bottom
-                    glVertex3f(bx, by - 0.003f, bz);
-                    glVertex3f(bx + 1, by - 0.003f, bz);
-                    glVertex3f(bx + 1, by - 0.003f, bz + 1);
-                    glVertex3f(bx, by - 0.003f, bz + 1);
-                } else if (selectedFaceNormalX == 1) { // Right
-                    glVertex3f(bx + ps, by, bz);
-                    glVertex3f(bx + ps, by + 1, bz);
-                    glVertex3f(bx + ps, by + 1, bz + 1);
-                    glVertex3f(bx + ps, by, bz + 1);
-                } else if (selectedFaceNormalX == -1) { // Left
-                    glVertex3f(bx - 0.003f, by, bz);
-                    glVertex3f(bx - 0.003f, by, bz + 1);
-                    glVertex3f(bx - 0.003f, by + 1, bz + 1);
-                    glVertex3f(bx - 0.003f, by + 1, bz);
-                } else if (selectedFaceNormalZ == 1) { // Front
-                    glVertex3f(bx, by, bz + ps);
-                    glVertex3f(bx + 1, by, bz + ps);
-                    glVertex3f(bx + 1, by + 1, bz + ps);
-                    glVertex3f(bx, by + 1, bz + ps);
-                } else if (selectedFaceNormalZ == -1) { // Back
-                    glVertex3f(bx, by, bz - 0.003f);
-                    glVertex3f(bx, by + 1, bz - 0.003f);
-                    glVertex3f(bx + 1, by + 1, bz - 0.003f);
-                    glVertex3f(bx + 1, by, bz - 0.003f);
+                // --- Draw Chunks (flat color, no lighting) ---
+                shader.bind();
+                shader.setUniform("projectionMatrix", camera.getProjectionMatrix(aspect));
+                shader.setUniform("viewMatrix", camera.getViewMatrix());
+                shader.setUniform("modelMatrix", new org.joml.Matrix4f().identity());
+                shader.setUniform("renderMode", renderMode);
+
+                org.joml.Matrix4f viewProj = new org.joml.Matrix4f(camera.getProjectionMatrix(aspect))
+                        .mul(camera.getViewMatrix());
+                org.joml.FrustumIntersection frustum = new org.joml.FrustumIntersection(viewProj);
+
+                for (Chunk chunk : worldChunks.values()) {
+                    chunk.render();
                 }
-                glEnd();
-                glDisable(GL_BLEND);
-            }
 
-        } // end if (!blind)
+                shader.unbind();
 
-        drawChunkGrid(aspect);
+                // --- Draw projectile and explosion cubes ---
+                glDisable(GL_TEXTURE_2D);
+                glEnable(GL_COLOR_MATERIAL);
+                for (Projectile p : activeProjectiles) {
+                    drawSolidCube(p.x, p.y, p.z, 0.08f, 1.0f, 0.7f, 0.2f, 1.0f);
+                }
+                for (CubeParticle part : activeCubeParticles) {
+                    float alpha = Math.max(0.0f, Math.min(1.0f, part.life));
+                    drawSolidCube(part.x, part.y, part.z, part.size, part.r, part.g, part.b, alpha);
+                }
+                /*
+                 * for (Physics.Debris d : physics.activeDebris) {
+                 * com.bulletphysics.linearmath.Transform trans = new
+                 * com.bulletphysics.linearmath.Transform();
+                 * d.body.getMotionState().getWorldTransform(trans);
+                 * 
+                 * glPushMatrix();
+                 * glTranslatef(trans.origin.x, trans.origin.y, trans.origin.z);
+                 * glColor3f(0.2f, 0.2f, 0.2f); // Dark grey object
+                 * 
+                 * float s = 0.12f; // Bullet / Debris radius
+                 * glBegin(GL_QUADS);
+                 * // Front Face
+                 * glVertex3f(-s, -s, s);
+                 * glVertex3f(s, -s, s);
+                 * glVertex3f(s, s, s);
+                 * glVertex3f(-s, s, s);
+                 * // Back Face
+                 * glVertex3f(-s, -s, -s);
+                 * glVertex3f(-s, s, -s);
+                 * glVertex3f(s, s, -s);
+                 * glVertex3f(s, -s, -s);
+                 * // Top Face
+                 * glVertex3f(-s, s, -s);
+                 * glVertex3f(-s, s, s);
+                 * glVertex3f(s, s, s);
+                 * glVertex3f(s, s, -s);
+                 * // Bottom Face
+                 * glVertex3f(-s, -s, -s);
+                 * glVertex3f(s, -s, -s);
+                 * glVertex3f(s, -s, s);
+                 * glVertex3f(-s, -s, s);
+                 * // Right Face
+                 * glVertex3f(s, -s, -s);
+                 * glVertex3f(s, s, -s);
+                 * glVertex3f(s, s, s);
+                 * glVertex3f(s, -s, s);
+                 * // Left Face
+                 * glVertex3f(-s, -s, -s);
+                 * glVertex3f(-s, -s, s);
+                 * glVertex3f(-s, s, s);
+                 * glVertex3f(-s, s, -s);
+                 * glEnd();
+                 * glPopMatrix();
+                 * }
+                 */
 
-        // Draw Crosshair using simple Ortho compatibility pass
+                // Draw Block Highlight in the 3D world!
+                if (hasSelection) {
+                    glMatrixMode(GL_PROJECTION);
+                    glLoadMatrixf(camera.getProjectionMatrix(aspect).get(new float[16]));
+                    glMatrixMode(GL_MODELVIEW);
+                    glLoadMatrixf(camera.getViewMatrix().get(new float[16]));
+
+                    glDisable(GL_TEXTURE_2D);
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glLineWidth(3.0f);
+
+                    float bx = selectedBlockX;
+                    float by = selectedBlockY;
+                    float bz = selectedBlockZ;
+
+                    // Wireframe Box around block
+                    glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // Solid white line
+                    float s = 1.002f; // Slightly larger to prevent Z-fighting
+                    float o = -0.001f;
+
+                    glBegin(GL_LINES);
+                    // Bottom
+                    glVertex3f(bx + o, by + o, bz + o);
+                    glVertex3f(bx + o + s, by + o, bz + o);
+                    glVertex3f(bx + o + s, by + o, bz + o);
+                    glVertex3f(bx + o + s, by + o, bz + o + s);
+                    glVertex3f(bx + o + s, by + o, bz + o + s);
+                    glVertex3f(bx + o, by + o, bz + o + s);
+                    glVertex3f(bx + o, by + o, bz + o + s);
+                    glVertex3f(bx + o, by + o, bz + o);
+                    // Top
+                    glVertex3f(bx + o, by + o + s, bz + o);
+                    glVertex3f(bx + o + s, by + o + s, bz + o);
+                    glVertex3f(bx + o + s, by + o + s, bz + o);
+                    glVertex3f(bx + o + s, by + o + s, bz + o + s);
+                    glVertex3f(bx + o + s, by + o + s, bz + o + s);
+                    glVertex3f(bx + o, by + o + s, bz + o + s);
+                    glVertex3f(bx + o, by + o + s, bz + o + s);
+                    glVertex3f(bx + o, by + o + s, bz + o);
+                    // Verticals
+                    glVertex3f(bx + o, by + o, bz + o);
+                    glVertex3f(bx + o, by + o + s, bz + o);
+                    glVertex3f(bx + o + s, by + o, bz + o);
+                    glVertex3f(bx + o + s, by + o + s, bz + o);
+                    glVertex3f(bx + o + s, by + o, bz + o + s);
+                    glVertex3f(bx + o + s, by + o + s, bz + o + s);
+                    glVertex3f(bx + o, by + o, bz + o + s);
+                    glVertex3f(bx + o, by + o + s, bz + o + s);
+                    glEnd();
+
+                    // Draw face highlight slightly transparent white
+                    glColor4f(1.0f, 1.0f, 1.0f, 0.2f);
+                    float ps = 1.003f; // Face overlay must be slightly more offset
+                    glBegin(GL_QUADS);
+                    if (selectedFaceNormalY == 1) { // Top
+                        glVertex3f(bx, by + ps, bz);
+                        glVertex3f(bx, by + ps, bz + 1);
+                        glVertex3f(bx + 1, by + ps, bz + 1);
+                        glVertex3f(bx + 1, by + ps, bz);
+                    } else if (selectedFaceNormalY == -1) { // Bottom
+                        glVertex3f(bx, by - 0.003f, bz);
+                        glVertex3f(bx + 1, by - 0.003f, bz);
+                        glVertex3f(bx + 1, by - 0.003f, bz + 1);
+                        glVertex3f(bx, by - 0.003f, bz + 1);
+                    } else if (selectedFaceNormalX == 1) { // Right
+                        glVertex3f(bx + ps, by, bz);
+                        glVertex3f(bx + ps, by + 1, bz);
+                        glVertex3f(bx + ps, by + 1, bz + 1);
+                        glVertex3f(bx + ps, by, bz + 1);
+                    } else if (selectedFaceNormalX == -1) { // Left
+                        glVertex3f(bx - 0.003f, by, bz);
+                        glVertex3f(bx - 0.003f, by, bz + 1);
+                        glVertex3f(bx - 0.003f, by + 1, bz + 1);
+                        glVertex3f(bx - 0.003f, by + 1, bz);
+                    } else if (selectedFaceNormalZ == 1) { // Front
+                        glVertex3f(bx, by, bz + ps);
+                        glVertex3f(bx + 1, by, bz + ps);
+                        glVertex3f(bx + 1, by + 1, bz + ps);
+                        glVertex3f(bx, by + 1, bz + ps);
+                    } else if (selectedFaceNormalZ == -1) { // Back
+                        glVertex3f(bx, by, bz - 0.003f);
+                        glVertex3f(bx, by + 1, bz - 0.003f);
+                        glVertex3f(bx + 1, by + 1, bz - 0.003f);
+                        glVertex3f(bx + 1, by, bz - 0.003f);
+                    }
+                    glEnd();
+                    glDisable(GL_BLEND);
+                }
+
+            } // end if (!blind)
+
+            drawChunkGrid(aspect);
+
+            // Draw Crosshair using simple Ortho compatibility pass
             int[] wWidth = new int[1], wHeight = new int[1];
             glfwGetFramebufferSize(window, wWidth, wHeight);
 
@@ -736,26 +834,39 @@ public class Main {
 
     private void rebuildChunkAndNeighbors(Chunk c) {
         c.buildMesh(this::getBlockGlobal);
-        int[][] dirs = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        int[][] dirs = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
         for (int[] d : dirs) {
-            Chunk nb = worldChunks.get(packChunkKey(c.chunkX+d[0], c.chunkY+d[1], c.chunkZ+d[2]));
-            if (nb != null) nb.buildMesh(this::getBlockGlobal);
+            Chunk nb = worldChunks.get(packChunkKey(c.chunkX + d[0], c.chunkY + d[1], c.chunkZ + d[2]));
+            if (nb != null)
+                nb.buildMesh(this::getBlockGlobal);
         }
     }
 
     public void breakBlock() {
-        if (!hasSelection) return;
+        if (!hasSelection)
+            return;
         Chunk c = setBlockGlobal(selectedBlockX, selectedBlockY, selectedBlockZ, (byte) 0);
         if (c != null) {
-            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".ogg", 1.0f, 1.0f);
+            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
             rebuildChunkAndNeighbors(c);
-            
-            // JBullet Limit Tester!
-            physics.spawnDebris(selectedBlockX, selectedBlockY, selectedBlockZ);
         }
     }
 
     private void placeBlock() {
+        if (selectedBlockType == TOOL_PROJECTILE) {
+            float px = camera.position.x;
+            float py = camera.position.y;
+            float pz = camera.position.z;
+            float yawRad = (float) Math.toRadians(camera.yaw);
+            float pitchRad = (float) Math.toRadians(camera.pitch);
+            float dirX = (float) (Math.sin(yawRad) * Math.cos(pitchRad));
+            float dirY = (float) -Math.sin(pitchRad);
+            float dirZ = (float) (-Math.cos(yawRad) * Math.cos(pitchRad));
+            spawnProjectile(px, py, pz, dirX, dirY, dirZ);
+            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
+            return;
+        }
+
         if (!hasSelection)
             return;
         int placeX = selectedBlockX + selectedFaceNormalX;
@@ -784,10 +895,163 @@ public class Main {
         if (!checkAABBIntersect(pMinX, pMinY, pMinZ, pMaxX, pMaxY, pMaxZ, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ)) {
             Chunk c = setBlockGlobal(placeX, placeY, placeZ, selectedBlockType);
             if (c != null) {
-                AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".ogg", 1.0f, 1.0f);
+                AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
                 rebuildChunkAndNeighbors(c);
             }
         }
+    }
+
+    private void spawnProjectile(float px, float py, float pz, float dirX, float dirY, float dirZ) {
+        Projectile p = new Projectile();
+        p.x = px + dirX * 0.6f;
+        p.y = py + dirY * 0.6f;
+        p.z = pz + dirZ * 0.6f;
+        float speed = 32.0f;
+        p.vx = dirX * speed;
+        p.vy = dirY * speed;
+        p.vz = dirZ * speed;
+        p.life = 3.0f;
+        activeProjectiles.add(p);
+    }
+
+    private void explodeIntoCubes(float x, float y, float z) {
+        for (int i = 0; i < 42; i++) {
+            float dx = rng.nextFloat() * 2.0f - 1.0f;
+            float dy = rng.nextFloat() * 2.0f - 1.0f;
+            float dz = rng.nextFloat() * 2.0f - 1.0f;
+            float len = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (len < 0.0001f) {
+                dx = 0.0f;
+                dy = 1.0f;
+                dz = 0.0f;
+                len = 1.0f;
+            }
+            dx /= len;
+            dy /= len;
+            dz /= len;
+
+            CubeParticle part = new CubeParticle();
+            part.x = x;
+            part.y = y;
+            part.z = z;
+            float speed = 3.0f + rng.nextFloat() * 7.0f;
+            part.vx = dx * speed;
+            part.vy = dy * speed;
+            part.vz = dz * speed;
+            part.life = 0.35f + rng.nextFloat() * 0.75f;
+            part.size = 0.05f + rng.nextFloat() * 0.09f;
+            part.r = 0.35f + rng.nextFloat() * 0.25f;
+            part.g = 0.25f + rng.nextFloat() * 0.20f;
+            part.b = 0.15f + rng.nextFloat() * 0.15f;
+            activeCubeParticles.add(part);
+        }
+    }
+
+    private void updateProjectiles(float dt) {
+        Iterator<Projectile> pit = activeProjectiles.iterator();
+        while (pit.hasNext()) {
+            Projectile p = pit.next();
+            p.life -= dt;
+            if (p.life <= 0.0f) {
+                pit.remove();
+                continue;
+            }
+
+            p.vy -= 8.0f * dt;
+            float nextX = p.x + p.vx * dt;
+            float nextY = p.y + p.vy * dt;
+            float nextZ = p.z + p.vz * dt;
+
+            float segDx = nextX - p.x;
+            float segDy = nextY - p.y;
+            float segDz = nextZ - p.z;
+            float segLen = (float) Math.sqrt(segDx * segDx + segDy * segDy + segDz * segDz);
+            int steps = Math.max(1, (int) Math.ceil(segLen / 0.2f));
+            boolean hit = false;
+
+            for (int s = 1; s <= steps; s++) {
+                float t = (float) s / (float) steps;
+                float sx = p.x + segDx * t;
+                float sy = p.y + segDy * t;
+                float sz = p.z + segDz * t;
+                byte b = getBlockGlobal((int) Math.floor(sx), (int) Math.floor(sy), (int) Math.floor(sz));
+                if (isSolidBlock(b)) {
+                    explodeIntoCubes(sx, sy, sz);
+                    pit.remove();
+                    hit = true;
+                    break;
+                }
+            }
+
+            if (!hit) {
+                p.x = nextX;
+                p.y = nextY;
+                p.z = nextZ;
+            }
+        }
+
+        Iterator<CubeParticle> cit = activeCubeParticles.iterator();
+        while (cit.hasNext()) {
+            CubeParticle part = cit.next();
+            part.life -= dt;
+            if (part.life <= 0.0f) {
+                cit.remove();
+                continue;
+            }
+
+            part.vy -= 14.0f * dt;
+            float nx = part.x + part.vx * dt;
+            float ny = part.y + part.vy * dt;
+            float nz = part.z + part.vz * dt;
+
+            byte b = getBlockGlobal((int) Math.floor(nx), (int) Math.floor(ny), (int) Math.floor(nz));
+            if (isSolidBlock(b)) {
+                part.vx *= -0.25f;
+                part.vy *= -0.35f;
+                part.vz *= -0.25f;
+            } else {
+                part.x = nx;
+                part.y = ny;
+                part.z = nz;
+            }
+        }
+    }
+
+    private void drawSolidCube(float x, float y, float z, float s, float r, float g, float b, float a) {
+        glColor4f(r, g, b, a);
+        float x0 = x - s;
+        float x1 = x + s;
+        float y0 = y - s;
+        float y1 = y + s;
+        float z0 = z - s;
+        float z1 = z + s;
+
+        glBegin(GL_QUADS);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x0, y1, z0);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y0, z1);
+        glVertex3f(x1, y0, z0);
+        glVertex3f(x1, y1, z0);
+        glVertex3f(x1, y1, z1);
+        glVertex3f(x0, y0, z0);
+        glVertex3f(x0, y0, z1);
+        glVertex3f(x0, y1, z1);
+        glVertex3f(x0, y1, z0);
+        glEnd();
     }
 
     private void handleInput(float dt) {
@@ -805,6 +1069,7 @@ public class Main {
         }
 
         boolean isCrouching = keys[GLFW_KEY_LEFT_SHIFT];
+        boolean isJumpPressed = keys[GLFW_KEY_SPACE] || (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
 
         // Let the player maintain their sprint through a jump!
         if (!keys[GLFW_KEY_W] || isCrouching) {
@@ -814,41 +1079,107 @@ public class Main {
             isSprintingState = true;
         }
 
+        float ph = isCrouching ? 1.5f : 1.61f; // Player fixed height golden ratio
+        boolean isInWater = isPlayerInWater(ph);
+
         float targetSpeed = Config.BASE_SPEED;
-        if (isCrouching) {
+        boolean isSwimSprint = isInWater && keys[GLFW_KEY_LEFT_CONTROL];
+        boolean isSwimSlow = isInWater && keys[GLFW_KEY_LEFT_SHIFT];
+        if (isInWater) {
+            targetSpeed = Config.SWIM_SPEED;
+            if (isSwimSprint) {
+                targetSpeed *= Config.SWIM_SPRINT_MULT;
+            }
+            if (isSwimSlow) {
+                targetSpeed *= Config.SWIM_SLOW_MULT;
+            }
+        } else if (isCrouching) {
             targetSpeed = Config.BASE_SPEED * Config.CROUCH_SPEED_MULT;
         } else if (isSprintingState) {
             targetSpeed = Config.SPRINT_SPEED;
         }
 
-        // Horizontal Movement logic
-        float rawDx = 0, rawDz = 0;
+        float yawRad = (float) Math.toRadians(camera.yaw);
+        float pitchRad = (float) Math.toRadians(camera.pitch);
 
-        if (keys[GLFW_KEY_W]) {
-            rawDx += (float) Math.sin(Math.toRadians(camera.yaw));
-            rawDz -= (float) Math.cos(Math.toRadians(camera.yaw));
-        }
-        if (keys[GLFW_KEY_S]) {
-            rawDx -= (float) Math.sin(Math.toRadians(camera.yaw));
-            rawDz += (float) Math.cos(Math.toRadians(camera.yaw));
-        }
-        if (keys[GLFW_KEY_A]) {
-            rawDx += (float) Math.sin(Math.toRadians(camera.yaw - 90));
-            rawDz -= (float) Math.cos(Math.toRadians(camera.yaw - 90));
-        }
-        if (keys[GLFW_KEY_D]) {
-            rawDx += (float) Math.sin(Math.toRadians(camera.yaw + 90));
-            rawDz -= (float) Math.cos(Math.toRadians(camera.yaw + 90));
-        }
+        if (isInWater) {
+            float lookX = (float) (Math.sin(yawRad) * Math.cos(pitchRad));
+            float lookY = (float) -Math.sin(pitchRad);
+            float lookZ = (float) (-Math.cos(yawRad) * Math.cos(pitchRad));
+            float rightX = (float) Math.sin(Math.toRadians(camera.yaw + 90.0f));
+            float rightZ = (float) -Math.cos(Math.toRadians(camera.yaw + 90.0f));
 
-        // Normalize direction vector to prevent faster diagonal movement
-        float length = (float) Math.sqrt(rawDx * rawDx + rawDz * rawDz);
-        if (length > 0) {
-            velocityX = (rawDx / length) * targetSpeed;
-            velocityZ = (rawDz / length) * targetSpeed;
+            float rawSwimX = 0.0f;
+            float rawSwimY = 0.0f;
+            float rawSwimZ = 0.0f;
+
+            if (keys[GLFW_KEY_W]) {
+                rawSwimX += lookX;
+                rawSwimY += lookY;
+                rawSwimZ += lookZ;
+            }
+            if (keys[GLFW_KEY_S]) {
+                rawSwimX -= lookX;
+                rawSwimY -= lookY;
+                rawSwimZ -= lookZ;
+            }
+            if (keys[GLFW_KEY_A]) {
+                rawSwimX -= rightX;
+                rawSwimZ -= rightZ;
+            }
+            if (keys[GLFW_KEY_D]) {
+                rawSwimX += rightX;
+                rawSwimZ += rightZ;
+            }
+            if (isJumpPressed) {
+                rawSwimY += 1.0f;
+            }
+
+            float swimLength = (float) Math.sqrt(rawSwimX * rawSwimX + rawSwimY * rawSwimY + rawSwimZ * rawSwimZ);
+            float targetVelX = 0.0f;
+            float targetVelY = -Config.SWIM_SINK_SPEED;
+            float targetVelZ = 0.0f;
+            if (swimLength > 0.0f) {
+                targetVelX = (rawSwimX / swimLength) * targetSpeed;
+                targetVelY = (rawSwimY / swimLength) * targetSpeed;
+                targetVelZ = (rawSwimZ / swimLength) * targetSpeed;
+            }
+
+            float waterControl = Math.min(1.0f, Config.SWIM_CONTROL * dt);
+            velocityX += (targetVelX - velocityX) * waterControl;
+            velocityY += (targetVelY - velocityY) * waterControl;
+            velocityZ += (targetVelZ - velocityZ) * waterControl;
+            isGrounded = false;
         } else {
-            velocityX = 0;
-            velocityZ = 0;
+            // Horizontal Movement logic
+            float rawDx = 0, rawDz = 0;
+
+            if (keys[GLFW_KEY_W]) {
+                rawDx += (float) Math.sin(yawRad);
+                rawDz -= (float) Math.cos(yawRad);
+            }
+            if (keys[GLFW_KEY_S]) {
+                rawDx -= (float) Math.sin(yawRad);
+                rawDz += (float) Math.cos(yawRad);
+            }
+            if (keys[GLFW_KEY_A]) {
+                rawDx += (float) Math.sin(Math.toRadians(camera.yaw - 90));
+                rawDz -= (float) Math.cos(Math.toRadians(camera.yaw - 90));
+            }
+            if (keys[GLFW_KEY_D]) {
+                rawDx += (float) Math.sin(Math.toRadians(camera.yaw + 90));
+                rawDz -= (float) Math.cos(Math.toRadians(camera.yaw + 90));
+            }
+
+            // Normalize direction vector to prevent faster diagonal movement
+            float length = (float) Math.sqrt(rawDx * rawDx + rawDz * rawDz);
+            if (length > 0) {
+                velocityX = (rawDx / length) * targetSpeed;
+                velocityZ = (rawDz / length) * targetSpeed;
+            } else {
+                velocityX = 0;
+                velocityZ = 0;
+            }
         }
 
         // Smoothly interpolate FOV based on actual horizontal velocity
@@ -859,16 +1190,15 @@ public class Main {
         float dx = velocityX * dt;
         float dz = velocityZ * dt;
 
-        // Gravity
-        velocityY -= Config.GRAVITY * dt;
-        boolean isJumpPressed = keys[GLFW_KEY_SPACE] || (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-        if (isJumpPressed && isGrounded) {
-            velocityY = Config.JUMP_VELOCITY;
-            isGrounded = false;
+        if (!isInWater) {
+            // Gravity
+            velocityY -= Config.GRAVITY * dt;
+            if (isJumpPressed && isGrounded) {
+                velocityY = Config.JUMP_VELOCITY;
+                isGrounded = false;
+            }
         }
         float dy = velocityY * dt;
-
-        float ph = isCrouching ? 1.5f : 1.61f; // Player fixed height golden ratio
 
         // Prevent feet from snapping up/down by adjusting eye position to compensate
         // for height change
@@ -898,13 +1228,13 @@ public class Main {
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
                 for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
+                    if (isSolidBlock(getBlockGlobal(x, y, z)))
                         collisionX = true;
                 }
             }
         }
         // Crouch Edge Detection
-        if (!collisionX && isCrouching && isGrounded) {
+        if (!collisionX && isCrouching && isGrounded && !isInWater) {
             if (!isSupportedAt(nextX, camera.position.z, camera.position.y, pRadiusX, pRadiusZ, pHeight)) {
                 collisionX = true;
                 dx = 0; // Prevent pushing mathematically
@@ -918,6 +1248,7 @@ public class Main {
                 camera.position.x = (float) Math.floor(minX) + 1.0f + pRadiusX + 0.001f;
             }
             velocityX = 0;
+            velocityZ = 0;
         } else {
             camera.position.x = nextX;
         }
@@ -936,7 +1267,7 @@ public class Main {
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
                 for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
+                    if (isSolidBlock(getBlockGlobal(x, y, z)))
                         collisionY = true;
                 }
             }
@@ -966,13 +1297,13 @@ public class Main {
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
                 for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) != 0)
+                    if (isSolidBlock(getBlockGlobal(x, y, z)))
                         collisionZ = true;
                 }
             }
         }
         // Crouch Edge Detection
-        if (!collisionZ && isCrouching && isGrounded) {
+        if (!collisionZ && isCrouching && isGrounded && !isInWater) {
             if (!isSupportedAt(camera.position.x, nextZ, camera.position.y, pRadiusX, pRadiusZ, pHeight)) {
                 collisionZ = true;
                 dz = 0;
@@ -985,6 +1316,7 @@ public class Main {
             } else if (dz < 0) { // Moving negative Z, hit back face of block
                 camera.position.z = (float) Math.floor(minZ) + 1.0f + pRadiusZ + 0.001f;
             }
+            velocityX = 0;
             velocityZ = 0;
         } else {
             camera.position.z = nextZ;
@@ -1019,8 +1351,32 @@ public class Main {
 
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                if (getBlockGlobal(x, yCheck, z) != 0)
+                if (isSolidBlock(getBlockGlobal(x, yCheck, z)))
                     return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isSolidBlock(byte blockType) {
+        return blockType != Chunk.AIR && blockType != Chunk.WATER;
+    }
+
+    private boolean isPlayerInWater(float playerHeight) {
+        float minX = camera.position.x - 0.3f;
+        float maxX = camera.position.x + 0.3f;
+        float minY = camera.position.y - playerHeight;
+        float maxY = camera.position.y + 0.18f;
+        float minZ = camera.position.z - 0.3f;
+        float maxZ = camera.position.z + 0.3f;
+
+        for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
+            for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
+                for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
+                    if (getBlockGlobal(x, y, z) == Chunk.WATER) {
+                        return true;
+                    }
+                }
             }
         }
         return false;
@@ -1075,7 +1431,7 @@ public class Main {
             if (dist > 1000.0f)
                 break; // Maximum reach
 
-            if (getBlockGlobal(x, y, z) != 0) {
+            if (isSolidBlock(getBlockGlobal(x, y, z))) {
                 hasSelection = true;
                 selectedBlockX = x;
                 selectedBlockY = y;
@@ -1201,7 +1557,12 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        new Main().run();
+        try {
+            new Main().run();
+        } catch (Exception e) {
+            e.printStackTrace();
+            javax.swing.JOptionPane.showMessageDialog(null, "Error: " + e.getMessage() + "\n" + e.toString(),
+                    "Engine Crash", javax.swing.JOptionPane.ERROR_MESSAGE);
+        }
     }
 }
-

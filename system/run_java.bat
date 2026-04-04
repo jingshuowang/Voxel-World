@@ -8,4 +8,5 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 echo Running...
-start "" javaw -cp "lib/*;." system.Main
+java -cp "lib/*;." system.Main
+pause

@@ -1,9 +1,16 @@
 package system;
+
 public class Config {
     // --- MOVEMENT ---
     public static float BASE_SPEED = 4.8f; // Default walking speed
     public static float SPRINT_SPEED = 6.24f; // Speed when sprinting (WASD by default)
     public static float CROUCH_SPEED_MULT = 0.3f; // Multiplier applied to speed when crouching
+    public static float SWIM_SPEED = 2.2f; // Horizontal swim speed
+    public static float SWIM_RISE_SPEED = 2.4f; // Upward swim speed while holding space
+    public static float SWIM_SINK_SPEED = 0.8f; // Constant slow sinking in water
+    public static float SWIM_CONTROL = 3.2f; // Water movement response
+    public static float SWIM_SPRINT_MULT = 1.6f; // Faster swim while holding ctrl
+    public static float SWIM_SLOW_MULT = 0.45f; // Slower swim while holding shift
 
     // --- PHYSICS ---
     public static float GRAVITY = 32.0f;
@@ -25,7 +32,7 @@ public class Config {
     public static float AIR_SLIPPERINESS = 0.9f; // Less momentum retained in the air (0.75)
 
     // --- TERRAIN GENERATION ---
-    public static float PERLIN_AMPLITUDE = 150.0f; // Multiplier for terrain height
-    public static float PERLIN_FREQUENCY = 0.08f; // Zoom level / frequency of features
+    public static float PERLIN_AMPLITUDE = 96.0f; // Multiplier for terrain height
+    public static float PERLIN_FREQUENCY = 0.03f; // Zoom level / frequency of features
     public static float PERLIN_POWER = 2.0f; // Exponent for valleys and peaks
 }
