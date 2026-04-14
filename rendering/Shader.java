@@ -3,7 +3,6 @@ package rendering;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 
@@ -50,13 +49,20 @@ public class Shader {
         if (glGetProgrami(programId, GL_LINK_STATUS) == 0) {
             throw new Exception("Error linking Shader code: " + glGetProgramInfoLog(programId, 1024));
         }
-        if (vertexShaderId != 0) glDetachShader(programId, vertexShaderId);
-        if (fragmentShaderId != 0) glDetachShader(programId, fragmentShaderId);
+        if (vertexShaderId != 0)
+            glDetachShader(programId, vertexShaderId);
+        if (fragmentShaderId != 0)
+            glDetachShader(programId, fragmentShaderId);
         glValidateProgram(programId);
     }
 
-    public void bind() { glUseProgram(programId); }
-    public void unbind() { glUseProgram(0); }
+    public void bind() {
+        glUseProgram(programId);
+    }
+
+    public void unbind() {
+        glUseProgram(0);
+    }
 
     public void setUniform(String name, int value) {
         glUniform1i(glGetUniformLocation(programId, name), value);
@@ -78,6 +84,7 @@ public class Shader {
 
     public void cleanup() {
         unbind();
-        if (programId != 0) glDeleteProgram(programId);
+        if (programId != 0)
+            glDeleteProgram(programId);
     }
 }

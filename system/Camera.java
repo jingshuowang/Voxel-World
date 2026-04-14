@@ -10,7 +10,7 @@ public class Camera {
 
     private float fov = (float) Math.toRadians(100.0f);
     private float zNear = 0.1f;
-    private float zFar = 30000.f;
+    private float zFar = 8000.f;
 
     public Camera() {
         position = new Vector3f(0, 50, 0);
@@ -30,8 +30,8 @@ public class Camera {
     public Matrix4f getProjectionMatrix(float aspect) {
         Matrix4f projectionMatrix = new Matrix4f();
         projectionMatrix.identity();
-        // Reversed-Z: swap near and far for better depth precision
-        projectionMatrix.perspective(fov, aspect, zFar, zNear);
+        // Standard Z
+        projectionMatrix.perspective(fov, aspect, zNear, zFar);
         return projectionMatrix;
     }
 

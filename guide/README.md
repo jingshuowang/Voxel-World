@@ -354,7 +354,7 @@ Core game logic that runs on the CPU. No OpenGL calls.
 00:11:51.560 watch in this video on
 00:11:56.000 screen
 basically for rendering firstly, render using meshes so for each chunk they all render at the same time each chunk is a 16 time 16 times 16 cube. so we can eleiminate triangles to get rid to increase speed. for empty spaces we call it air blocks and we dont render them. butr this is very usefgul for things like ledge crouching and also what we are doing now so only render faces that is touching BOTH air and solid blocks this makes faces not render in the air but also not in the ground. making stuf go less,also we use greedy meshes which is in the guide folder, this eliminates triangles by combining samefacing ajacent and triangles that can make a giant treiangle for less rnedering. Next step is to make less data for each triangl (square) to optimise the data storage. Firstly we dont need ot use vec3 since all the faces in the game line up to the 3d grid so we can accualy store the data of the triangles corner as a byte, for each chunk we only need 6 bits. currently the data is zzzzzzyyyyyyxxxxxx. Step 3, each side also stores a normal vector which handles a lot of stuf of lighting and effects, it stored the direction its facing, the normal. theres only 6 possible normals 0 for y+ 1 for y- 2 for x+ 3 for x- 4 for z+ 5 for z-.  so now its fffzzzzzzyyyyyyxxxxxx. we also need a texutre for each one so lets add texutres which is just green for now so just 1 bits enough but the video shows 7 so why not , now its tttttttfffzzzzzzyyyyyyxxxxxx. this cna be decoded using bit masking for decoding pos x y z the direction and texture ID. which is simple to make a simple image selector for a png 0 for top lefdt and goes right until last one in first row and then next rows most left onee and so on until bottom right. each image is 16 by 16 pixels in texture.png. ok now we have a problem all the chunks stack on top each other to fix this each chunk has a world position multiplied by a factor which is added to the triangles(squares) position or you could say t he verticies position now we have a decent fps 2000 but not good enough. step 3 is to use opengls particle system, this is good since it uses instancing, you can set the base model as a face of a block, a square this has 4 verticies. and this has data which is the one we tlaked about earlier 0000tttttttfffzzzzzzyyyyyyxxxxxx, instead of drawing 6 times you only need to draw once.  bu8t everything is facing up oh no, now we need to add face direction which is already stored in data so we can use that to rotate the model t the correct direction. but since we are using the base model we only need 31 at max(this is wrong sine we using chunks of 16 but the video make it perfectly fit into a byteso we going to say we have 31 at most) this means we can simplify to tttttttfffzzzzzyyyyyxxxxx. we also need 5 units for length in greedy meshing so now its 00llllltttttttfffzzzzzyyyyyxxxxx. so the model is only effected by the texture, face(rotate) and length(witdh we adding later) which is just stretching the modle. step 4: right now each chunk has its own data which is stoobid, we can fuse all of the chunks data into one large buffer, to render at one time. We can render this with a function which only has a import of the base modle and 4 numebrs the first 2 refers to the base voxel model and the next two is the start and length of the part of the buffer we using(ex glDrawArraysInstancedBaseInstance(Gl_triangle_strip, 0,4,15,16) thich means to take value from the buffur form #15 to #30)we could repeat the function but thats multiple draw calls instead we goiing to use a indirect buffer and then opengl will render them all at the same time but it overlaps since we cant use shader uniforms, to fix this we can create a ssbo, shader storage buffer object, we can store anything we want, we will store the world position of every chunk we are TRYING to draw dont waste time on ones we arent drawing. Lastly some tricks can make ur fps peaking at 20000, firstly we can ignore triangles facing away, for this to work remeber the combined buffur instead of each chunk being a whole mesh we can create 6 meshes one for every direction, same order y+ y- x+ x- z+ z-, we are still ony lahving one draw but onyl rendering the mesh facing the player. and remeber in stpe 3 we said we gona add more width yessir we can delete the face direction in data straip since simemeber the ssbo, ssbo+inderect buffer+thedrawid draws a mesh or block im not sure but its obvious. we can accualy store the direction of each mesh to the ssbo making it a vec4. now we have perfectly 5 more bits in our vertex data so its now lllllwwwwwtttttttfffzzzzzyyyyyxxxxx(in greeedy meshing w which is witdh just makign it stretchs the other way its technally wit ha length dont overcomplicate it has nothing to do with 3d). Basically render smart and make data use bytes instead of vec 3 and 4 if can and other parts are explaiend before.
-
+STOP HERE
 after these rendering trick theres this gmaeplan firstly dont complicate to to fit these rnedering strat we will have to simliplity a bit a add variatiosn later for now we will just use one block type and one texture(just solid dark green). so each chunk is 16 times 16 times 16 blocks. fore the systme part there is a 3d grid and each block is a cube with y going up and x and z going horizontally. player movement is kept the same and it hanbdkles world generation and physics etc. basically all stuf rendering dosent do perlin noise with high prequency and low amplitude and then make the hights perlin nosie to power of 2. For rendering part  its simple combine tricks with simple rendering(just render each block as a dark green cube for now) which includes block rendering renderign the sky which is just blue for now with simle saylight cycle the path of the sun and moon is on a circle them 2 oposite to each other. the sky just turns darker blue at night. camera is handled by both system and rendering so put camera stuf in rendering and system with system doing cpu stuf and rendering doing gpu stuf. the rendering auso includes audio rendering. Handle shaders later. Also keep variable names simple greedy meshiong in guide folder
 
 second guide video, volumetric light, because classic methods of 3d rendering is way too costly I have ummerized better methods, we choose random positions and draw flat squares there all of them facing the same direction and stretched up in the y axis and its a rectangle. add a sun colored gradient to the rectangle and lastly angle these planes towards the sun. The fectrangle is easily rendered as 2 triangles. but theres a problem the light isnt rendered in corret spots since its random, we can fix this by cheaking samples aroudn the light and the light is brightest when theres 
@@ -363,10 +363,383 @@ over half of them in sunlight the beam is brightest(opacity = 1-abs(percentSunli
 3rd guide: ambient occlusion, kinda simple kinda compl;ex, defered shading, for each pixel if the sample point is futher away to the camera than the other sampler points we consider that to be blocking ambient light. but this is bad a shpere sahped area will fial on a floor and too costly. we can further imporve this by move the sampler point away form the noirmal slightly for better reselts. this is ok but we can use baked ambient oclusion, the blocks don't move so this is ok for now, for example if the blocks that are ajcent to a edge are 90 degrees from each other, parts close to the edge will we sahdered darker idk how t o explain but you get it.
 
 More Techniques: Frustum culling, this is based on normal since normals shows direction of faces, this seems complex but just dont render the faces that is facing away, LOD, very simple 
-lod, basiacally for every few layers of chunks getting bigger we make texture lower and block count lower and ocmbine the chunks / meshes. sinking isnt avalible since we create complex system, so rendering increases as distance increases. so we should have back face culling, frustum culling, occlusion cullting is jsut not rendering things behidn another, and level detail. And greedy meshing. Then use multithreadting. to separate chung genration like rendering and accual system code(generation, system etc).
+lod, basiacally for every few layers of chunks getting bigger we make texture lower and block count lower and ocmbine the chunks / meshes. sinking isnt avalible since we create complex system, so rendering increases as distance increases. so we should have back face culling, frustum culling, occlusion culling is jsut not rendering things behidn another, and level detail. And greedy meshing. Then use multithreadting. to separate chung genration like rendering and accual system code(generation, system etc).
 
 Servers: this is the most easiest, its not fancy it just uses seeds and make player stuf sychronize player position. new player made when new username/passord, the ip is the seed and they join and idk if we need ports. player just a prism, yes just a rectangular prim 2 meter tall. theres a secret the server only save changes so it dosent crash, the same world seed makes the same world every time.
 future adtitives after im done learning them:w
-Complex sahdoers, shadows, realistic fluids, gloom, fog, reflection. 
+Complex sahdoers, shadows, realistic fluids, gloom, fog, reflection, PBR(likely not), raycast(probably not too lmao)temporary antiailias, gamma correction, motion blur, refined voxel, physcial . Combatt, bultiplyaer, biome etc.
 
 Aliasing, just use anti aliasing.
+
+Terrion noise example:
+vec4 GetChannel0(vec2 uv)
+{
+    uv = clamp(uv, vec2(0.001), vec2(0.999));
+    uv *= BUFFER_SIZE / iResolution.xy;
+    return texture(iChannel0, uv);
+}
+
+vec4 GetChannel1(vec2 uv)
+{
+    uv = fract(uv);
+    uv *= BUFFER_SIZE / iResolution.xy;
+    return texture(iChannel1, uv);
+}
+
+vec4 map(vec3 p, out float erosion)
+{
+    vec2 uv = p.xz + vec2(0.5) - vec2(0.5) / BUFFER_SIZE;
+    
+    vec4 tex = GetChannel0(uv);
+    float height = tex.x;
+    vec3 normal = tex.yzz;
+    normal.y = sqrt(1.0 - dot(normal.xz, normal.xz)); // Recover Y
+    
+    erosion = tex.w;
+    
+    return vec4(height, normal);
+}
+
+// Ray marching
+float march(vec3 ro, vec3 rd, out vec3 normal, out int material, out float s_t)
+{
+    s_t = 9999.0;
+    
+    vec3 boxNormal;
+    vec2 box = boxIntersection(ro, rd, vec3(0.5, 1.0, 0.5), boxNormal);
+    
+    if (box.y < 0.0)
+    {
+        return -1.0;
+    }
+    
+    float tStart = max(0.0, box.x) + 1e-2;
+    float tEnd = box.y - 1e-2;
+    
+    material = M_GROUND;
+
+    float stepSize = 0.0;
+    float stepScale = 1.0;
+    float t = tStart;
+    float altitude = 0.0;
+    for (int i = 0; i < 32; i++)
+    {
+        vec3 pos = ro + rd * t;
+        
+        float foo;
+        vec4 tex = map(pos, foo);
+        float h = tex.x;
+        normal = tex.yzw;
+        
+        altitude = pos.y - h;
+        
+        s_t = max(0.0, min(s_t, altitude / t));
+        
+        if (altitude < 0.0)
+        {
+            if (i < 1) // Sides
+            {
+                /*
+                if (diff < -0.1) // Bottom
+                {
+                    return -1.0;
+                }
+                */
+                if (pos.y < 0.35) // Flat bottom
+                {
+                    s_t = 9999.0;
+                    return -1.0;
+                }
+                normal = boxNormal;
+                material = M_STRATA;
+                break;
+            }
+        }
+        
+        if (altitude < 0.0)
+        {
+            // Step back (contact/edge refinement)
+            stepScale *= 0.5;
+            t -= stepSize * stepScale;
+        }
+        else
+        {
+            // Step forward
+            // Accelerate the ray by distance to terrain. This would result in horrible aliasing if we didn't do refinement above
+            stepSize = abs(altitude) + 1e-2;
+            //stepSize = (tEnd - tStart) / float(stepCount);
+            t += stepSize * stepScale;
+        }
+    }
+    
+    if (t > tEnd)
+    {
+        s_t = 9999.0;
+        return -1.0;
+    }
+    
+#ifdef WATER
+    vec3 waterNormal;
+    vec2 water = boxIntersection(ro, rd, vec3(0.5, WATER_HEIGHT, 0.5), waterNormal);
+    if ((water.y > 0.0 && (water.x < t || t < 0.0)) && material != M_STRATA)
+    {
+        t = max(0.0, water.x);
+        normal = waterNormal;
+        material = M_WATER;
+    }
+    else
+#endif
+
+    if (box.y < 0.0)
+    {
+        return -1.0;
+    }
+
+    return t;
+}
+
+vec3 GetReflection(vec3 p, vec3 r, vec3 sun, float smoothness)
+{
+    vec3 refl = SkyColor(r, sun) * 4.0;
+    
+    vec3 foo;
+    float r_t;
+    int r_material;
+    march(p, r, foo, r_material, r_t);
+    return refl * (1.0 - exp(-r_t * 10.0 * sq(smoothness)));
+}
+
+// Main image output
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+#ifdef SHOW_BUFFER
+    float debugWidth = iResolution.y / 2.0;
+#else
+    float debugWidth = 0.0;
+#endif
+
+    // ==========================================================================================
+    // Set up camera
+    // ==========================================================================================
+    vec2 cameraAngle = vec2(iTime * 0.1 + PI * 1.5, -0.17 * PI);
+    float cameraDistance = 5.0;
+    
+    // Intro animation
+    cameraAngle.x -= exp(-iTime * 5.0) * 4.0;
+    cameraDistance += exp(-iTime * 5.0) * 5.0;
+        
+    if (iMouse.z > 0.5)
+    {
+        cameraAngle.x = PI / 2.0;
+        cameraAngle.y = -0.2 * PI;
+    }
+    
+    vec3 ro = vec3(0.0, 0.325, 0.0);
+    vec3 rd = CameraRay(11.0, iResolution.xy, fragCoord.xy - vec2(debugWidth / 2.0, 0.0));
+    
+    mat3 rot = CameraRotation(cameraAngle.yx);
+    rd = rot * rd;
+    ro = rot * ro + rot * vec3(0, 0, cameraDistance);
+    
+    // ==========================================================================================
+    // Ray march
+    // ==========================================================================================
+    vec4 foo;
+    vec3 normal;
+    int material;
+    float t = march(ro, rd, normal, material, foo.w);
+    
+    // ==========================================================================================
+    // Shade
+    // ==========================================================================================
+#ifdef FIXED_SUN
+    vec3 sun = normalize(vec3(-1.0, 0.4, 0.05));
+#else
+    vec3 sun = rot * normalize(vec3(-1.0, 0.1, 0.25));
+#endif
+    
+    vec3 fogColor = 1.0 - exp(-SkyColor(rd, sun) * 2.0);
+    
+    vec3 color;
+    
+    if (t < 0.0)
+    {
+        // Sky
+        color = fogColor * (1.0 + pow(fragCoord.y / iResolution.y, 3.0) * 3.0) * 0.5;
+#ifdef SHOW_NORMALS
+        color = vec3(0.5, 0.5, 1.0);
+#endif
+    }
+    else
+    {
+        vec3 pos = ro + rd * t;
+        
+        float erosion;
+        //float h = map(pos, erosion).x;
+        float diff = pos.y - map(pos, erosion).x;
+        
+        vec4 breakupTex = vec4(0.0);
+        
+#ifdef DETAIL_TEXTURE
+        breakupTex = GetChannel1(pos.xz + 0.5);
+        vec3 breakupNormal = breakupTex.zyw;
+        if (material != M_STRATA)
+        {
+            normal = normalize(normal + breakupNormal.xzy * 0.1);
+        }            
+#endif
+        float breakup = breakupTex.x;
+
+        vec3 f0 = vec3(0.04);
+        float smoothness = 0.0;
+        float reflAmount = 0.0;
+        float occlusion = 1.0;
+        
+        vec3 r = reflect(rd, normal);
+        
+        vec3 diffuseColor = vec3(0.5);
+        if (material == M_GROUND)
+        {
+#ifndef GREYSCALE
+            occlusion = sq(saturate(erosion + 0.5));
+            
+            // Cliffs / Dirt
+            diffuseColor = CLIFF_COLOR * smoothstep(0.4, 0.52, pos.y);
+            //diffuseColor = mix(diffuseColor, DIRT_COLOR, smoothstep(0.8, 0.9, normal.y - erosion * 0.1 + breakup * 0.05));
+            diffuseColor = mix(diffuseColor, DIRT_COLOR, smoothstep(0.3, 0.0, occlusion + breakup * 1.0));
+            
+            // Grass
+            vec3 grassMix = mix(GRASS_COLOR1, GRASS_COLOR2, smoothstep(0.4, 0.6, pos.y - erosion * 0.05 + breakup * 0.3));
+            //diffuseColor = mix(diffuseColor, grassMix, smoothstep(0.8, 0.95, normal.y - erosion * 0.2 + breakup * 0.1));
+            diffuseColor = mix(diffuseColor, grassMix, smoothstep(WATER_HEIGHT + 0.05, WATER_HEIGHT + 0.02, pos.y - breakup * 0.02) * smoothstep(0.8, 1.0, normal.y + breakup * 0.1));
+            
+            // Snow
+            diffuseColor = mix(diffuseColor, vec3(1.0), smoothstep(0.53, 0.6, pos.y + breakup * 0.1));
+    #ifdef WATER
+            // Sand (beach)
+            diffuseColor = mix(diffuseColor, SAND_COLOR, smoothstep(WATER_HEIGHT + 0.005, WATER_HEIGHT, pos.y + breakup * 0.01));
+    #endif
+            diffuseColor *= 1.0 + breakup * 0.5;
+#endif
+        }
+        else if (material == M_STRATA)
+        {
+#ifndef GREYSCALE
+            vec3 strata = smoothstep(0.0, 1.0, cos(diff * vec3(130.0, 190.0, 250.0)));
+            diffuseColor = vec3(0.3);
+            diffuseColor = mix(diffuseColor, vec3(0.50), strata.x);
+            diffuseColor = mix(diffuseColor, vec3(0.55), strata.y);
+            diffuseColor = mix(diffuseColor, vec3(0.60), strata.z);
+            
+            diffuseColor *= exp(diff * 10.0) * vec3(1.0, 0.9, 0.7);
+#endif
+        }
+        else if (material == M_WATER)
+        {
+            float shore = normal.y > 1e-2 ? exp(-diff * 60.0) : 0.0;
+            float foam = normal.y > 1e-2 ? smoothstep(0.005, 0.0, diff + breakup * 0.005) : 0.0;
+        
+            diffuseColor = mix(WATER_COLOR, WATER_SHORE_COLOR, shore);
+            
+            diffuseColor = mix(diffuseColor, vec3(1.0), foam);
+            
+            //f0 = vec3(0.2);
+            smoothness = 0.95;
+        }
+        
+        float shadow = 1.0;
+        
+#ifdef SHADOWS
+        if (material != M_STRATA)
+        {
+            // Shadow ray
+            float s_t;
+            int s_material;
+            march(pos + vec3(0.0, 1.0, 0.0) * 1e-4, sun, foo.xyz, s_material, s_t);
+            shadow = 1.0 - exp(-s_t * 20.0);
+            //fragColor = vec4(shadow, shadow, shadow, 1.0);
+            //return;
+        }
+#endif
+
+        // Ambient
+        color = diffuseColor * SkyColor(normal, sun) * occlusion * Fd_Lambert();
+        // Direct
+        color += Shade(diffuseColor, f0, smoothness, normal, -rd, sun, SUN_COLOR * shadow);
+        // Bounce
+        color += diffuseColor * SUN_COLOR * (dot(normal, sun * vec3(1.0,-1.0, 1.0)) * 0.5 + 0.5) * Fd_Lambert() / PI;
+        // Reflection
+        color += GetReflection(pos, r, sun, smoothness) * F_Schlick(f0, dot(-rd, normal));
+        // Fog
+        float fog = exp(-t * t * smoothstep(WATER_HEIGHT, WATER_HEIGHT - 0.5, pos.y) * 0.5);
+        //color = mix(fogColor, color, fog);
+        
+        //color = vec3(exp(-max(0.0, -erosion * 2.0)));
+        //color = vec3(occlusion);
+
+#ifdef SHOW_DIFFUSE
+        color = pow(diffuseColor, vec3(1.0 / 2.2));
+#elif defined(SHOW_NORMALS)
+        color = normal.xzy * 0.5 + 0.5;
+#endif
+    }
+    
+    vec3 boxNormal;
+    vec2 box = boxIntersection(ro, rd, vec3(0.5, 1.0, 0.5), boxNormal);
+    
+    float costh = dot(rd, sun);
+    float phaseR = PhaseRayleigh(costh);
+    float phaseM = PhaseMie(costh, 0.6);
+    
+    vec2 od = vec2(0.0);
+    vec3 tsm;
+    vec3 sct = vec3(0.0);
+    float rayLength = (t > 0.0 ? t : box.y) - box.x;
+    float stepSize = rayLength / 16.0;
+    for (float i = 0.0; i < 16.0; i++)
+    {
+        vec3 p = ro + rd * (box.x + (i + 0.5) * stepSize);
+        
+        float h = max(0.0, p.y - 0.35);
+        //float d = exp(-h * 5.0);
+        float d = 1.0 - saturate(h / 0.2);
+        
+        if (p.y < 0.35)
+        {
+            d = 0.0;
+        }
+        
+        float densityR = d * 1e5;
+        float densityM = d * 1e5;
+        
+        od += stepSize * vec2(densityR, densityM);
+        
+        tsm = exp(-(od.x * C_RAYLEIGH + od.y * C_MIE));
+        
+        sct += tsm * C_RAYLEIGH * phaseR * densityR * stepSize;
+        sct += tsm * C_MIE * phaseM * densityM * stepSize;
+    }
+    
+    color = color * tsm + sct * 10.0;
+
+#if !defined(SHOW_NORMALS) && !defined(SHOW_DIFFUSE)
+    color = Tonemap_ACES(color);
+    color = pow(color, vec3(1.0 / 2.2));
+#endif
+
+    // Dither
+    color += texture(iChannel2, mod(fragCoord.xy, iChannelResolution[2].xy) / iChannelResolution[2].xy).xxx / 255.0;
+
+#ifdef SHOW_BUFFER
+    vec2 debugUV = fragCoord / debugWidth;
+    if (debugUV.x > 0.0 && debugUV.x < 1.0 && debugUV.y > 0.0 && debugUV.y < 2.0)
+    {
+        vec4 tex = GetChannel0(fract(debugUV));
+        vec3 normal = tex.yzz;
+        normal.y = sqrt(1.0 - dot(normal.xz,normal.xz));
+        color = debugUV.y > 1.0 ? normal.xzy * 0.5 + 0.5 : tex.xxx * 2.5 - 0.75;
+    }
+#endif
+    
+    fragColor = vec4(color, 1.0);
+} 
