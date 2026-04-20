@@ -1,13 +1,21 @@
 package system;
 
-import org.lwjgl.*;
-import org.lwjgl.glfw.*;
-import org.lwjgl.opengl.*;
-
-import rendering.Shader;
-import rendering.AudioPlayer;
-
+import com.bulletphysics.collision.broadphase.DbvtBroadphase;
+import com.bulletphysics.collision.dispatch.CollisionDispatcher;
+import com.bulletphysics.collision.dispatch.DefaultCollisionConfiguration;
+import com.bulletphysics.collision.shapes.BoxShape;
+import com.bulletphysics.collision.shapes.BvhTriangleMeshShape;
+import com.bulletphysics.collision.shapes.CapsuleShape;
+import com.bulletphysics.collision.shapes.TriangleIndexVertexArray;
+import com.bulletphysics.dynamics.DiscreteDynamicsWorld;
+import com.bulletphysics.dynamics.RigidBody;
+import com.bulletphysics.dynamics.RigidBodyConstructionInfo;
+import com.bulletphysics.dynamics.constraintsolver.SequentialImpulseConstraintSolver;
+import com.bulletphysics.linearmath.DefaultMotionState;
+import com.bulletphysics.linearmath.Transform;
 import java.nio.*;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -18,6 +26,11 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import org.joml.Matrix4f;
+import org.lwjgl.*;
+import org.lwjgl.glfw.*;
+import org.lwjgl.opengl.*;
+import rendering.Audio;
 
 import static org.lwjgl.glfw.Callbacks.*;
 import static org.lwjgl.glfw.GLFW.*;
@@ -31,20 +44,28 @@ import static org.lwjgl.opengl.GL43.*; // GL_SHADER_STORAGE_BUFFER, glBindBuffer
 import static org.lwjgl.system.MemoryStack.*;
 import static org.lwjgl.system.MemoryUtil.*;
 
+
+
+
+
+import static org.lwjgl.opengl.GL31.*; // glDrawArraysInstanced, GL_UNIFORM_BUFFER
+import static org.lwjgl.opengl.GL33.*; // glVertexAttribDivisor
+import static org.lwjgl.opengl.GL43.*; // GL_SHADER_STORAGE_BUFFER, glBindBufferBase, GL_DRAW_INDIRECT_BUFFER, glMultiDrawArraysIndirect
+
 public class Main {
 
     private long window;
-    private Shader shader;
-    private Shader skyShader;
+    private rendering.Graphics.Shader shader;
+    private rendering.Graphics.Shader skyShader;
     private Camera camera;
 
-    private Map<Long, Chunk> worldChunks;
+    private Map<Long, Chunks.Chunk> worldChunks;
     private static final int LOAD_RADIUS_XZ = 100;
     private static final int LOAD_RADIUS_Y = 256;   // 256 chunks * 16 = 4096 blocks (2^12)
     private static final int UNLOAD_RADIUS_XZ = 110;
     private static final int UNLOAD_RADIUS_Y = 264;  // slightly beyond load radius
     private static final int WORLD_HEIGHT_BLOCKS = 16384;
-    private static final int WORLD_HEIGHT_CHUNKS = WORLD_HEIGHT_BLOCKS / Chunk.CHUNK_SIZE;
+    private static final int WORLD_HEIGHT_CHUNKS = WORLD_HEIGHT_BLOCKS / Chunks.Chunk.CHUNK_SIZE;
     private static final int XZ_BLOCK_BITS = 24;
     private static final int XZ_CHUNK_BITS = XZ_BLOCK_BITS - 4;
     private static final int Y_CHUNK_BITS = 10;
@@ -52,26 +73,26 @@ public class Main {
     private static final long Y_CHUNK_MASK = (1L << Y_CHUNK_BITS) - 1L;
 
     // Background chunk generation -- multiple threads for large radius
-    private final ConcurrentLinkedQueue<Chunk> chunksToUpload = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Chunks.Chunk> chunksToUpload = new ConcurrentLinkedQueue<>();
     // Lock-free set: ConcurrentHashMap.newKeySet() has no global lock unlike synchronizedSet
     private final Set<Long> chunksLoading = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.ArrayDeque<Long> chunksNeedingRebuild = new java.util.ArrayDeque<>();
     private volatile boolean chunkThreadRunning = true;
-    private static final int GEN_THREAD_COUNT = 4;
+    private static final int GEN_THREAD_COUNT = 2;
     private Thread[] chunkGenThreads = new Thread[GEN_THREAD_COUNT];
     // No unloadFrameCounter -- unload is incremental every frame (small batch).
 
     // Global MDI render resources (created once, reused every frame)
     private int globalVaoId;       // one VAO for all chunks
     private int globalVboId;       // face data for visible chunks (rebuilt per frame)
+    private int globalVboOffset = 0; // Linear pointer to VRAM allocation
     private int globalIndirectBuf; // DrawArraysIndirect commands (rebuilt per frame)
     private int globalPositionSSBO;// chunk world offsets indexed by gl_DrawID
 
     // Pre-allocated MDI assembly buffers -- grown as needed, NEVER freed each frame.
     // Eliminates per-frame large array allocation and GC pressure.
-    private int[]   mdiFaceBuffer     = new int[1 << 20]; // 4MB starting cap
-    private int[]   mdiIndirectBuffer = new int[1024 * 4];
-    private float[] mdiPosBuffer      = new float[1024 * 4];
+        private java.nio.IntBuffer mdiIndirectBuffer = org.lwjgl.system.MemoryUtil.memAllocInt(16384 * 4);
+    private java.nio.FloatBuffer mdiPosBuffer = org.lwjgl.system.MemoryUtil.memAllocFloat(16384 * 4);
 
     private boolean[] keys = new boolean[GLFW_KEY_LAST];
     private double lastMouseX = -1;
@@ -94,7 +115,7 @@ public class Main {
     private volatile boolean needsCursorLock = false;
     private boolean isSprintingState = false;
     private static final byte TOOL_PROJECTILE = (byte) 127;
-    private byte selectedBlockType = Chunk.STONE;
+    private byte selectedBlockType = Chunks.Chunk.STONE;
     private int renderMode = 0; // 0=normal, 1=normals, 2=depth, 3=wireframe
     private boolean showDebugStatsAndGrid = false; // F3 toggles debug view
     private boolean wasSpacePressed = false;
@@ -165,7 +186,7 @@ public class Main {
             }
         }
         if (worldChunks != null) {
-            for (Chunk c : worldChunks.values()) {
+            for (Chunks.Chunk c : worldChunks.values()) {
                 c.cleanup();
             }
         }
@@ -275,9 +296,9 @@ public class Main {
                 System.out.println("Selected Ability: Platform");
             }
             if (key == GLFW_KEY_3 && action == GLFW_PRESS)
-                selectedBlockType = Chunk.STONE;
+                selectedBlockType = Chunks.Chunk.STONE;
             if (key == GLFW_KEY_4 && action == GLFW_PRESS)
-                selectedBlockType = Chunk.SNOW;
+                selectedBlockType = Chunks.Chunk.SNOW;
             if (key == GLFW_KEY_5 && action == GLFW_PRESS)
                 selectedBlockType = TOOL_PROJECTILE;
             if (key == GLFW_KEY_F3 && action == GLFW_PRESS)
@@ -349,14 +370,14 @@ public class Main {
         glfwShowWindow(window);
     }
 
-    public Chunk setBlockGlobal(int x, int y, int z, byte type) {
+    public Chunks.Chunk setBlockGlobal(int x, int y, int z, byte type) {
         int chunkX = (int) Math.floor(x / 16.0f);
         int chunkY = (int) Math.floor(y / 16.0f);
         int chunkZ = (int) Math.floor(z / 16.0f);
         int localX = x - (chunkX * 16);
         int localY = y - (chunkY * 16);
         int localZ = z - (chunkZ * 16);
-        Chunk c = worldChunks.get(packChunkKey(chunkX, chunkY, chunkZ));
+        Chunks.Chunk c = worldChunks.get(packChunkKey(chunkX, chunkY, chunkZ));
         if (c != null) {
             c.setBlock(localX, localY, localZ, type);
             return c;
@@ -371,7 +392,7 @@ public class Main {
         int localX = x - (chunkX * 16);
         int localY = y - (chunkY * 16);
         int localZ = z - (chunkZ * 16);
-        Chunk c = worldChunks.get(packChunkKey(chunkX, chunkY, chunkZ));
+        Chunks.Chunk c = worldChunks.get(packChunkKey(chunkX, chunkY, chunkZ));
         if (c != null) {
             return c.getBlock(localX, localY, localZ);
         }
@@ -395,7 +416,7 @@ public class Main {
         // frame)
         int uploaded = 0;
         while (uploaded < 256) {
-            Chunk chunk = chunksToUpload.poll();
+            Chunks.Chunk chunk = chunksToUpload.poll();
             if (chunk == null)
                 break;
             chunk.uploadMesh();
@@ -417,7 +438,7 @@ public class Main {
         int rebuilt = 0;
         while (rebuilt < 4 && !chunksNeedingRebuild.isEmpty()) {
             long nk = chunksNeedingRebuild.poll();
-            Chunk nb = worldChunks.get(nk);
+            Chunks.Chunk nb = worldChunks.get(nk);
             if (nb != null) {
                 nb.buildMeshData(this::getBlockGlobal);
                 nb.uploadMesh();
@@ -428,10 +449,10 @@ public class Main {
         // Unload far chunks incrementally: max 32 per frame to spread the cost.
         // Iterates a subset of the map each frame, cycling through over time.
         int unloaded = 0;
-        Iterator<Map.Entry<Long, Chunk>> it = worldChunks.entrySet().iterator();
+        Iterator<Map.Entry<Long, Chunks.Chunk>> it = worldChunks.entrySet().iterator();
         while (it.hasNext() && unloaded < 32) {
-            Map.Entry<Long, Chunk> entry = it.next();
-            Chunk c = entry.getValue();
+            Map.Entry<Long, Chunks.Chunk> entry = it.next();
+            Chunks.Chunk c = entry.getValue();
             int ddx = c.chunkX - playerChunkX;
             int ddz = c.chunkZ - playerChunkZ;
             if ((long)ddx * ddx + (long)ddz * ddz > (long)UNLOAD_RADIUS_XZ * UNLOAD_RADIUS_XZ
@@ -458,26 +479,38 @@ public class Main {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         // --- Create global MDI rendering resources ---
-        globalVaoId = glGenVertexArrays();
+                globalVaoId = glGenVertexArrays();
         glBindVertexArray(globalVaoId);
         globalVboId = glGenBuffers();
         glBindBuffer(GL_ARRAY_BUFFER, globalVboId);
+        glBufferData(GL_ARRAY_BUFFER, 200_000_000L, GL_STATIC_DRAW); // 200MB global streaming geometry VBO limit
         // Attribute 0: per-instance packed face uint, divisor=1
         glVertexAttribIPointer(0, 1, GL_UNSIGNED_INT, Integer.BYTES, 0);
         glEnableVertexAttribArray(0);
         glVertexAttribDivisor(0, 1);
+        
+        // --- INTEL DRIVER CRASH FIX ---
+        // Bind a dummy per-vertex attribute (divisor=0) to prevent native driver crash on empty vertex streams!
+        int dummyVbo = glGenBuffers();
+        glBindBuffer(GL_ARRAY_BUFFER, dummyVbo);
+        glBufferData(GL_ARRAY_BUFFER, new float[]{0,0,0,0}, GL_STATIC_DRAW);
+        glVertexAttribPointer(1, 1, GL_FLOAT, false, 0, 0L);
+        glEnableVertexAttribArray(1);
+        glVertexAttribDivisor(1, 0); // per-vertex
+        // ------------------------------
+
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindVertexArray(0);
         globalIndirectBuf = glGenBuffers();
         globalPositionSSBO = glGenBuffers();
 
         try {
-            shader = new Shader();
+            shader = new rendering.Graphics.Shader();
             shader.createVertexShaderFromFile("Asset/shader/chunk.vs");
             shader.createFragmentShaderFromFile("Asset/shader/chunk.fs");
             shader.link();
 
-            skyShader = new Shader();
+            skyShader = new rendering.Graphics.Shader();
             skyShader.createVertexShaderFromFile("Asset/shader/sky.vs");
             skyShader.createFragmentShaderFromFile("Asset/shader/sky.fs");
             skyShader.link();
@@ -495,8 +528,8 @@ public class Main {
 
         // Pre-generate spawn area SYNCHRONOUSLY so ground exists before player falls!
         System.out.println("Pre-generating spawn chunks (small radius)...");
-        int spawnTerrainY = Chunk.getTerrainHeight(0, 0);
-        int spawnCY = spawnTerrainY / Chunk.CHUNK_SIZE;
+        int spawnTerrainY = Chunks.Chunk.getTerrainHeight(0, 0);
+        int spawnCY = spawnTerrainY / Chunks.Chunk.CHUNK_SIZE;
         int spawnRadius = 2;
         for (int dx = -spawnRadius; dx <= spawnRadius; dx++) {
             for (int dz = -spawnRadius; dz <= spawnRadius; dz++) {
@@ -506,7 +539,7 @@ public class Main {
                 for (int cy = Math.max(-LOAD_RADIUS_Y, spawnCY - 4); cy <= Math.min(LOAD_RADIUS_Y, spawnCY + 4); cy++) {
                     long key = packChunkKey(dx, cy, dz);
                     if (!worldChunks.containsKey(key)) {
-                        Chunk chunk = new Chunk(dx, cy, dz);
+                        Chunks.Chunk chunk = new Chunks.Chunk(dx, cy, dz);
                         chunk.generateTerrain();
                         chunk.buildMeshData(this::getBlockGlobal);
                         chunk.uploadMesh();
@@ -546,16 +579,16 @@ public class Main {
                         for (int dz = -r; dz <= r && generated < 256; dz++) {
                             if (Math.abs(dx) != r && Math.abs(dz) != r) continue;
                             if ((long)dx*dx + (long)dz*dz > (long)LOAD_RADIUS_XZ * LOAD_RADIUS_XZ) continue;
-                            int terrainH = Chunk.getTerrainHeight(
-                                    (pcx + dx) * Chunk.CHUNK_SIZE,
-                                    (pcz + dz) * Chunk.CHUNK_SIZE);
-                            int surfaceCY = terrainH / Chunk.CHUNK_SIZE;
+                            int terrainH = Chunks.Chunk.getTerrainHeight(
+                                    (pcx + dx) * Chunks.Chunk.CHUNK_SIZE,
+                                    (pcz + dz) * Chunks.Chunk.CHUNK_SIZE);
+                            int surfaceCY = terrainH / Chunks.Chunk.CHUNK_SIZE;
                             int cyMin = Math.max(-LOAD_RADIUS_Y, surfaceCY - 4);
                             int cyMax = Math.min(LOAD_RADIUS_Y, surfaceCY + 6);
                             for (int cy = cyMin; cy <= cyMax; cy++) {
                                 long key = packChunkKey(pcx + dx, cy, pcz + dz);
                                 if (!worldChunks.containsKey(key) && chunksLoading.add(key)) {
-                                    Chunk chunk = new Chunk(pcx + dx, cy, pcz + dz);
+                                    Chunks.Chunk chunk = new Chunks.Chunk(pcx + dx, cy, pcz + dz);
                                     chunk.generateTerrain();
                                     chunk.buildMeshData(this::getBlockGlobal);
                                     chunksToUpload.add(chunk);
@@ -571,7 +604,7 @@ public class Main {
                 if (scanR > LOAD_RADIUS_XZ) scanR = 0; // full sweep done, restart
 
                 if (generated == 0) {
-                    try { Thread.sleep(20); } catch (InterruptedException e) { break; }
+                    try { Thread.sleep(50); } catch (InterruptedException e) { break; }
                 }
             }
             System.out.println("[ChunkGen] Thread " + Thread.currentThread().getName() + " stopped.");
@@ -585,10 +618,10 @@ public class Main {
         }
 
         System.out.println("Preloading Audio to RAM...");
-        AudioPlayer.preloadSound("Asset/sound/block1.wav");
-        AudioPlayer.preloadSound("Asset/sound/block2.wav");
-        AudioPlayer.preloadSound("Asset/sound/block3.wav");
-        AudioPlayer.preloadSound("Asset/sound/block4.wav");
+        Audio.preloadSound("Asset/sound/block1.wav");
+        Audio.preloadSound("Asset/sound/block2.wav");
+        Audio.preloadSound("Asset/sound/block3.wav");
+        Audio.preloadSound("Asset/sound/block4.wav");
 
         float lastTime = (float) glfwGetTime();
         int frameCount = 0;
@@ -648,7 +681,7 @@ public class Main {
                 }
             }
 
-            // Chunk management once per render frame
+            // Chunks.Chunk management once per render frame
             updateChunks();
 
             tpsTimer += rawDt;
@@ -691,7 +724,7 @@ public class Main {
 
             byte camBlock = getBlockGlobal((int) Math.floor(camera.position.x), (int) Math.floor(camera.position.y),
                     (int) Math.floor(camera.position.z));
-            boolean blind = (camBlock != 0 && camBlock != Chunk.WATER);
+            boolean blind = (camBlock != 0 && camBlock != Chunks.Chunk.WATER);
 
             if (blind) {
                 glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -740,14 +773,14 @@ public class Main {
                 org.joml.FrustumIntersection frustum = new org.joml.FrustumIntersection(viewProj);
 
                 // 1. Frustum cull and collect visible chunks
-                java.util.ArrayList<Chunk> visible = new java.util.ArrayList<>();
-                for (Chunk chunk : worldChunks.values()) {
+                java.util.ArrayList<Chunks.Chunk> visible = new java.util.ArrayList<>();
+                for (Chunks.Chunk chunk : worldChunks.values()) {
                     if (chunk.faceCount == 0) continue;
-                    float cMinX = chunk.chunkX * Chunk.CHUNK_SIZE;
-                    float cMinY = chunk.chunkY * Chunk.CHUNK_SIZE;
-                    float cMinZ = chunk.chunkZ * Chunk.CHUNK_SIZE;
+                    float cMinX = chunk.chunkX * Chunks.Chunk.CHUNK_SIZE;
+                    float cMinY = chunk.chunkY * Chunks.Chunk.CHUNK_SIZE;
+                    float cMinZ = chunk.chunkZ * Chunks.Chunk.CHUNK_SIZE;
                     if (frustum.testAab(cMinX, cMinY, cMinZ,
-                            cMinX + Chunk.CHUNK_SIZE, cMinY + Chunk.CHUNK_SIZE, cMinZ + Chunk.CHUNK_SIZE)) {
+                            cMinX + Chunks.Chunk.CHUNK_SIZE, cMinY + Chunks.Chunk.CHUNK_SIZE, cMinZ + Chunks.Chunk.CHUNK_SIZE)) {
                         visible.add(chunk);
                     }
                 }
@@ -756,52 +789,76 @@ public class Main {
                 if (drawCount > 0) {
                     // 2. Assemble face data + indirect commands + positions
                     //    into pre-allocated buffers -- zero per-frame GC allocation.
-                    int totalFaces = 0;
-                    for (Chunk c : visible) totalFaces += c.faceCount;
-
-                    // Grow buffers only when capacity is exceeded (amortised O(1))
-                    if (totalFaces > mdiFaceBuffer.length)
-                        mdiFaceBuffer = new int[totalFaces + (totalFaces >> 1)];
-                    if (drawCount * 4 > mdiIndirectBuffer.length) {
-                        mdiIndirectBuffer = new int[drawCount * 5];
-                        mdiPosBuffer      = new float[drawCount * 5];
+                    
+                    if (drawCount * 4 > mdiIndirectBuffer.capacity()) {
+                        org.lwjgl.system.MemoryUtil.memFree(mdiIndirectBuffer);
+                        org.lwjgl.system.MemoryUtil.memFree(mdiPosBuffer);
+                        mdiIndirectBuffer = org.lwjgl.system.MemoryUtil.memAllocInt(drawCount * 5);
+                        mdiPosBuffer      = org.lwjgl.system.MemoryUtil.memAllocFloat(drawCount * 5);
                     }
 
-                    int faceOff = 0;
-                    for (int i = 0; i < drawCount; i++) {
-                        Chunk c = visible.get(i);
-                        System.arraycopy(c.faceData, 0, mdiFaceBuffer, faceOff, c.faceCount);
-                        mdiIndirectBuffer[i * 4    ] = 4;
-                        mdiIndirectBuffer[i * 4 + 1] = c.faceCount;
-                        mdiIndirectBuffer[i * 4 + 2] = 0;
-                        mdiIndirectBuffer[i * 4 + 3] = faceOff;
-                        mdiPosBuffer[i * 4    ] = c.chunkX * Chunk.CHUNK_SIZE;
-                        mdiPosBuffer[i * 4 + 1] = c.chunkY * Chunk.CHUNK_SIZE;
-                        mdiPosBuffer[i * 4 + 2] = c.chunkZ * Chunk.CHUNK_SIZE;
-                        mdiPosBuffer[i * 4 + 3] = 0;
-                        faceOff += c.faceCount;
-                    }
-
-                    // 3. Zero-allocation GPU upload: wrap pre-allocated arrays as NIO views,
-                    //    set limit() to active slice size -- no heap copies, no GC objects.
-                    java.nio.IntBuffer   faceBuf      = java.nio.IntBuffer.wrap(mdiFaceBuffer).limit(totalFaces);
-                    java.nio.IntBuffer   indirectBuf2 = java.nio.IntBuffer.wrap(mdiIndirectBuffer).limit(drawCount * 4);
-                    java.nio.FloatBuffer posBuf       = java.nio.FloatBuffer.wrap(mdiPosBuffer).limit(drawCount * 4);
-
+                    mdiIndirectBuffer.clear();
+                    mdiPosBuffer.clear();
+                    
                     glBindBuffer(GL_ARRAY_BUFFER, globalVboId);
-                    glBufferData(GL_ARRAY_BUFFER, (long) totalFaces * Integer.BYTES, GL_DYNAMIC_DRAW);
-                    glBufferSubData(GL_ARRAY_BUFFER, 0L, faceBuf);
+
+                    for (int i = 0; i < drawCount; i++) {
+                        Chunks.Chunk c = visible.get(i);
+                        
+                        // Wait, if c.vboOffset == -1, upload it to the GPU permanently in static VRAM limit
+                        if (c.vboOffset == -1 && c.faceData != null && c.faceCount > 0) {
+                            c.vboOffset = globalVboOffset;
+                            glBufferSubData(GL_ARRAY_BUFFER, (long) c.vboOffset * Integer.BYTES, c.faceData);
+                            globalVboOffset += c.faceCount;
+                            
+                            // Let the JVM GC sweep out internal integer face array since the GPU handles it indefinitely
+                            c.faceData = null;  
+                        }
+                        
+                        // If it has faces mapped (or just uploaded!), build indirect parameters referencing that memory bounds linearly.
+                        if (c.vboOffset != -1) {
+                            mdiIndirectBuffer.put(i * 4    , 4);
+                            mdiIndirectBuffer.put(i * 4 + 1, c.faceCount);
+                            mdiIndirectBuffer.put(i * 4 + 2, 0);
+                            mdiIndirectBuffer.put(i * 4 + 3, c.vboOffset); // Instance bounds index perfectly
+                            
+                            mdiPosBuffer.put(i * 4    , c.chunkX * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 1, c.chunkY * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 2, c.chunkZ * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 3, 0);
+                        } else {
+                            mdiIndirectBuffer.put(i * 4    , 0);
+                            mdiIndirectBuffer.put(i * 4 + 1, 0);
+                            mdiIndirectBuffer.put(i * 4 + 2, 0);
+                            mdiIndirectBuffer.put(i * 4 + 3, 0);
+                            
+                            mdiPosBuffer.put(i * 4    , c.chunkX * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 1, c.chunkY * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 2, c.chunkZ * Chunks.Chunk.CHUNK_SIZE);
+                            mdiPosBuffer.put(i * 4 + 3, 0);
+                        }
+                    }
+
                     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+                    mdiIndirectBuffer.position(0);
+                    mdiIndirectBuffer.limit(drawCount * 4);
+                    mdiPosBuffer.position(0);
+                    mdiPosBuffer.limit(drawCount * 4);
+
+
 
                     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, globalIndirectBuf);
                     glBufferData(GL_DRAW_INDIRECT_BUFFER, (long) drawCount * 4 * Integer.BYTES, GL_DYNAMIC_DRAW);
-                    glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0L, indirectBuf2);
+                    glBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0L, mdiIndirectBuffer);
 
                     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, globalPositionSSBO);
                     glBindBuffer(GL_SHADER_STORAGE_BUFFER, globalPositionSSBO);
                     glBufferData(GL_SHADER_STORAGE_BUFFER, (long) drawCount * 4 * Float.BYTES, GL_DYNAMIC_DRAW);
-                    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0L, posBuf);
+                    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0L, mdiPosBuffer);
                     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+
 
                     // 4. One MDI call
                     glBindVertexArray(globalVaoId);
@@ -1184,11 +1241,11 @@ public class Main {
         }
     }
 
-    private void rebuildChunkAndNeighbors(Chunk c) {
+    private void rebuildChunkAndNeighbors(Chunks.Chunk c) {
         c.buildMesh(this::getBlockGlobal);
         int[][] dirs = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
         for (int[] d : dirs) {
-            Chunk nb = worldChunks.get(packChunkKey(c.chunkX + d[0], c.chunkY + d[1], c.chunkZ + d[2]));
+            Chunks.Chunk nb = worldChunks.get(packChunkKey(c.chunkX + d[0], c.chunkY + d[1], c.chunkZ + d[2]));
             if (nb != null)
                 nb.buildMesh(this::getBlockGlobal);
         }
@@ -1197,9 +1254,9 @@ public class Main {
     public void breakBlock() {
         if (!hasSelection)
             return;
-        Chunk c = setBlockGlobal(selectedBlockX, selectedBlockY, selectedBlockZ, (byte) 0);
+        Chunks.Chunk c = setBlockGlobal(selectedBlockX, selectedBlockY, selectedBlockZ, (byte) 0);
         if (c != null) {
-            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
+            Audio.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
             rebuildChunkAndNeighbors(c);
         }
     }
@@ -1234,7 +1291,7 @@ public class Main {
         float pMaxZ = camera.position.z + 0.3f;
 
         boolean playedSound = false;
-        HashSet<Chunk> chunksToUpdate = new HashSet<>();
+        HashSet<Chunks.Chunk> chunksToUpdate = new HashSet<>();
 
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
@@ -1244,11 +1301,11 @@ public class Main {
                             x, y, z, x + 1.0f, y + 1.0f, z + 1.0f))
                         continue;
                     if (getBlockGlobal(x, y, z) == 0) {
-                        Chunk c = setBlockGlobal(x, y, z, selectedBlockType);
+                        Chunks.Chunk c = setBlockGlobal(x, y, z, selectedBlockType);
                         if (c != null)
                             chunksToUpdate.add(c);
                         if (!playedSound) {
-                            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f,
+                            Audio.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f,
                                     1.0f);
                             playedSound = true;
                         }
@@ -1257,7 +1314,7 @@ public class Main {
             }
         }
 
-        for (Chunk c : chunksToUpdate) {
+        for (Chunks.Chunk c : chunksToUpdate) {
             rebuildChunkAndNeighbors(c);
         }
     }
@@ -1273,7 +1330,7 @@ public class Main {
             float dirY = (float) -Math.sin(pitchRad);
             float dirZ = (float) (-Math.cos(yawRad) * Math.cos(pitchRad));
             spawnProjectile(px, py, pz, dirX, dirY, dirZ);
-            AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
+            Audio.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
             return;
         }
 
@@ -1303,9 +1360,9 @@ public class Main {
         float bMaxZ = placeZ + 1.0f;
 
         if (!checkAABBIntersect(pMinX, pMinY, pMinZ, pMaxX, pMaxY, pMaxZ, bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ)) {
-            Chunk c = setBlockGlobal(placeX, placeY, placeZ, selectedBlockType);
+            Chunks.Chunk c = setBlockGlobal(placeX, placeY, placeZ, selectedBlockType);
             if (c != null) {
-                AudioPlayer.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
+                Audio.playSound("Asset/sound/block" + (int) (Math.random() * 4 + 1) + ".wav", 1.0f, 1.0f);
                 rebuildChunkAndNeighbors(c);
             }
         }
@@ -1698,8 +1755,7 @@ public class Main {
         // Crouch Edge Detection
         if (!collisionX && isCrouching && isGrounded && !isInWater) {
             if (!isSupportedAt(nextX, camera.position.z, camera.position.y, pRadiusX, pRadiusZ, pHeight)) {
-                collisionX = true;
-                dx = 0; // Prevent pushing mathematically
+                dx = 0;
             }
         }
 
@@ -1824,7 +1880,7 @@ public class Main {
     }
 
     private boolean isSolidBlock(byte blockType) {
-        return blockType != Chunk.AIR && blockType != Chunk.WATER;
+        return blockType != Chunks.Chunk.AIR && blockType != Chunks.Chunk.WATER;
     }
 
     private boolean isPlayerInWater(float playerHeight) {
@@ -1838,7 +1894,7 @@ public class Main {
         for (int x = (int) Math.floor(minX); x <= (int) Math.floor(maxX); x++) {
             for (int y = (int) Math.floor(minY); y <= (int) Math.floor(maxY); y++) {
                 for (int z = (int) Math.floor(minZ); z <= (int) Math.floor(maxZ); z++) {
-                    if (getBlockGlobal(x, y, z) == Chunk.WATER) {
+                    if (getBlockGlobal(x, y, z) == Chunks.Chunk.WATER) {
                         return true;
                     }
                 }
@@ -2018,4 +2074,293 @@ public class Main {
                     "Engine Crash", javax.swing.JOptionPane.ERROR_MESSAGE);
         }
     }
+
+
+    // --- Nested from system/Camera.java ---
+    
+    
+    public static class Camera {
+        public final org.joml.Vector3f position;
+        public float pitch; // up/down
+        public float yaw; // left/right
+    
+        private float fov = (float) Math.toRadians(100.0f);
+        private float zNear = 0.1f;
+        private float zFar = 8000.f;
+    
+        public Camera() {
+            position = new org.joml.Vector3f(0, 50, 0);
+            pitch = 0;
+            yaw = 0;
+        }
+    
+        public Matrix4f getViewMatrix() {
+            Matrix4f viewMatrix = new Matrix4f();
+            viewMatrix.identity();
+            viewMatrix.rotate((float) Math.toRadians(pitch), new org.joml.Vector3f(1, 0, 0));
+            viewMatrix.rotate((float) Math.toRadians(yaw), new org.joml.Vector3f(0, 1, 0));
+            viewMatrix.translate(-position.x, -position.y, -position.z);
+            return viewMatrix;
+        }
+    
+        public Matrix4f getProjectionMatrix(float aspect) {
+            Matrix4f projectionMatrix = new Matrix4f();
+            projectionMatrix.identity();
+            // Standard Z
+            projectionMatrix.perspective(fov, aspect, zNear, zFar);
+            return projectionMatrix;
+        }
+    
+        public void movePosition(float offsetX, float offsetY, float offsetZ) {
+            if (offsetZ != 0) {
+                position.x += (float) Math.sin(Math.toRadians(yaw)) * -1.0f * offsetZ;
+                position.z += (float) Math.cos(Math.toRadians(yaw)) * offsetZ;
+            }
+            if (offsetX != 0) {
+                position.x += (float) Math.sin(Math.toRadians(yaw - 90)) * -1.0f * offsetX;
+                position.z += (float) Math.cos(Math.toRadians(yaw - 90)) * offsetX;
+            }
+            position.y += offsetY;
+        }
+    
+        public void setFov(float fovDegrees) {
+            this.fov = (float) Math.toRadians(fovDegrees);
+        }
+    }
+    
+    // --- Nested from system/AABB.java ---
+    public static class AABB {
+        public float minX, minY, minZ;
+        public float maxX, maxY, maxZ;
+    
+        public AABB(float minX, float minY, float minZ, float maxX, float maxY, float maxZ) {
+            this.minX = minX;
+            this.minY = minY;
+            this.minZ = minZ;
+            this.maxX = maxX;
+            this.maxY = maxY;
+            this.maxZ = maxZ;
+        }
+    
+        public boolean intersects(AABB other) {
+            return (this.minX < other.maxX && this.maxX > other.minX) &&
+                    (this.minY < other.maxY && this.maxY > other.minY) &&
+                    (this.minZ < other.maxZ && this.maxZ > other.minZ);
+        }
+    
+        public void move(float dx, float dy, float dz) {
+            this.minX += dx;
+            this.maxX += dx;
+            this.minY += dy;
+            this.maxY += dy;
+            this.minZ += dz;
+            this.maxZ += dz;
+        }
+    }
+    
+    // --- Nested from system/Physics.java ---
+    
+    
+    
+    public static class Physics {
+        public DiscreteDynamicsWorld dynamicsWorld;
+        public RigidBody playerBody;
+        private final Map<Long, RigidBody> chunkBodies = new HashMap<>();
+    
+        public static class Debris {
+            public RigidBody body;
+            public float life;
+    
+            public Debris(RigidBody b, float l) {
+                body = b;
+                life = l;
+            }
+        }
+    
+        public List<Debris> activeDebris = new ArrayList<>();
+    
+        public Physics() {
+            DefaultCollisionConfiguration collisionConfiguration = new DefaultCollisionConfiguration();
+            CollisionDispatcher dispatcher = new CollisionDispatcher(collisionConfiguration);
+            DbvtBroadphase broadphase = new DbvtBroadphase();
+            SequentialImpulseConstraintSolver solver = new SequentialImpulseConstraintSolver();
+    
+            dynamicsWorld = new DiscreteDynamicsWorld(dispatcher, broadphase, solver, collisionConfiguration);
+            dynamicsWorld.setGravity(new javax.vecmath.Vector3f(0, -Config.GRAVITY, 0));
+    
+            initPlayer();
+        }
+    
+        private void initPlayer() {
+            CapsuleShape playerShape = new CapsuleShape(0.4f, 1.8f);
+            Transform startTransform = new Transform();
+            startTransform.setIdentity();
+            startTransform.origin.set(0, 100, 0); // Temporary high spawn
+    
+            float mass = 70.0f;
+            javax.vecmath.Vector3f localInertia = new javax.vecmath.Vector3f(0, 0, 0);
+            playerShape.calculateLocalInertia(mass, localInertia);
+    
+            DefaultMotionState myMotionState = new DefaultMotionState(startTransform);
+            RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(mass, myMotionState, playerShape,
+                    localInertia);
+            playerBody = new RigidBody(rbInfo);
+    
+            // Prevent angular rotation so camera doesn't fall over
+            playerBody.setAngularFactor(0.0f);
+            // Keep player body from going to sleep
+            playerBody.setActivationState(com.bulletphysics.collision.dispatch.CollisionObject.DISABLE_DEACTIVATION);
+    
+            dynamicsWorld.addRigidBody(playerBody);
+        }
+    
+        public void addChunkMesh(long key, float[] stagedVertices, int[] stagedIndices) {
+            if (chunkBodies.containsKey(key)) {
+                dynamicsWorld.removeRigidBody(chunkBodies.get(key));
+                chunkBodies.remove(key);
+            }
+    
+            if (stagedVertices == null || stagedIndices == null || stagedIndices.length == 0)
+                return;
+    
+            int numTriangles = stagedIndices.length / 3;
+            int numVertices = stagedVertices.length / 12;
+    
+            ByteBuffer verticesBuffer = ByteBuffer.allocateDirect(numVertices * 3 * 4);
+            verticesBuffer.order(ByteOrder.nativeOrder());
+            for (int i = 0; i < stagedVertices.length; i += 12) {
+                verticesBuffer.putFloat(stagedVertices[i]);
+                verticesBuffer.putFloat(stagedVertices[i + 1]);
+                verticesBuffer.putFloat(stagedVertices[i + 2]);
+            }
+            verticesBuffer.flip();
+    
+            ByteBuffer indicesBuffer = ByteBuffer.allocateDirect(stagedIndices.length * 4);
+            indicesBuffer.order(ByteOrder.nativeOrder());
+            // Since we extracted only the 3 position floats from the 12 staged floats,
+            // our new vertex stride is 3, so we must adjust the index values!
+            for (int index : stagedIndices) {
+                indicesBuffer.putInt(index);
+            }
+            indicesBuffer.flip();
+    
+            TriangleIndexVertexArray indexVertexArray = new TriangleIndexVertexArray(
+                    numTriangles, indicesBuffer, 3 * 4,
+                    numVertices, verticesBuffer, 3 * 4);
+    
+            BvhTriangleMeshShape shape = new BvhTriangleMeshShape(indexVertexArray, true);
+    
+            Transform transform = new Transform();
+            transform.setIdentity();
+    
+            RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(0.0f, new DefaultMotionState(transform), shape,
+                    new javax.vecmath.Vector3f(0, 0, 0));
+            RigidBody body = new RigidBody(rbInfo);
+            body.setFriction(1.0f); // Ground grip
+    
+            dynamicsWorld.addRigidBody(body);
+            chunkBodies.put(key, body);
+        }
+    
+        public void removeChunkMesh(long key) {
+            RigidBody body = chunkBodies.remove(key);
+            if (body != null) {
+                dynamicsWorld.removeRigidBody(body);
+            }
+        }
+    
+        public void shootBullet(float x, float y, float z, float dx, float dy, float dz) {
+            BoxShape boxShape = new BoxShape(new javax.vecmath.Vector3f(0.08f, 0.08f, 0.08f));
+            Transform startTransform = new Transform();
+            startTransform.setIdentity();
+            // Spawn right at the eye piece and push it forward
+            startTransform.origin.set(x + (dx * 0.5f), y + 0.18f + (dy * 0.5f), z + (dz * 0.5f));
+    
+            float mass = 15.0f; // Heavy bullet
+            javax.vecmath.Vector3f localInertia = new javax.vecmath.Vector3f(0, 0, 0);
+            boxShape.calculateLocalInertia(mass, localInertia);
+    
+            DefaultMotionState myMotionState = new DefaultMotionState(startTransform);
+            RigidBodyConstructionInfo rbInfo = new RigidBodyConstructionInfo(mass, myMotionState, boxShape, localInertia);
+            RigidBody body = new RigidBody(rbInfo);
+    
+            float speed = 80.0f;
+            body.setLinearVelocity(new javax.vecmath.Vector3f(dx * speed, dy * speed, dz * speed));
+            body.setRestitution(0.1f); // low bounce
+    
+            dynamicsWorld.addRigidBody(body);
+            activeDebris.add(new Debris(body, 6.0f)); // Give bullets 6 seconds to fly/fall
+        }
+    
+        public void stepSimulation(float dt) {
+            dynamicsWorld.stepSimulation(dt, 10);
+    
+            // Clean up debris
+            Iterator<Debris> it = activeDebris.iterator();
+            while (it.hasNext()) {
+                Debris d = it.next();
+                d.life -= dt;
+                if (d.life <= 0) {
+                    dynamicsWorld.removeRigidBody(d.body);
+                    it.remove();
+                }
+            }
+        }
+    }
+    
+    // --- Nested from system/VoxelData.java ---
+    public static class VoxelData {
+    
+            // UV coordinates for the block texture atlas or single textures
+            // Right now we just map 0.0 to 1.0 for the whole texture
+    
+            public static final float[] VERTICES = {
+                            // Front face (+Z)
+                            0.0f, 0.0f, 1.0f, 0.0f, 0.0f, // 0 Bottom-Left
+                            1.0f, 0.0f, 1.0f, 1.0f, 0.0f, // 1 Bottom-Right
+                            1.0f, 1.0f, 1.0f, 1.0f, 1.0f, // 2 Top-Right
+                            0.0f, 1.0f, 1.0f, 0.0f, 1.0f, // 3 Top-Left
+    
+                            // Back face (-Z)
+                            0.0f, 0.0f, 0.0f, 1.0f, 0.0f, // 4
+                            1.0f, 0.0f, 0.0f, 0.0f, 0.0f, // 5
+                            1.0f, 1.0f, 0.0f, 0.0f, 1.0f, // 6
+                            0.0f, 1.0f, 0.0f, 1.0f, 1.0f, // 7
+    
+                            // Top face (+Y)
+                            0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // 8
+                            1.0f, 1.0f, 0.0f, 1.0f, 1.0f, // 9
+                            1.0f, 1.0f, 1.0f, 1.0f, 0.0f, // 10
+                            0.0f, 1.0f, 1.0f, 0.0f, 0.0f, // 11
+    
+                            // Bottom face (-Y)
+                            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // 12
+                            1.0f, 0.0f, 0.0f, 1.0f, 0.0f, // 13
+                            1.0f, 0.0f, 1.0f, 1.0f, 1.0f, // 14
+                            0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // 15
+    
+                            // Right face (+X)
+                            1.0f, 0.0f, 1.0f, 0.0f, 0.0f, // 16
+                            1.0f, 0.0f, 0.0f, 1.0f, 0.0f, // 17
+                            1.0f, 1.0f, 0.0f, 1.0f, 1.0f, // 18
+                            1.0f, 1.0f, 1.0f, 0.0f, 1.0f, // 19
+    
+                            // Left face (-X)
+                            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // 20
+                            0.0f, 0.0f, 1.0f, 1.0f, 0.0f, // 21
+                            0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // 22
+                            0.0f, 1.0f, 0.0f, 0.0f, 1.0f // 23
+            };
+    
+            public static final int[] INDICES = {
+                            0, 1, 2, 2, 3, 0, // Front
+                            5, 4, 7, 7, 6, 5, // Back
+                            8, 9, 10, 10, 11, 8, // Top
+                            12, 13, 14, 14, 15, 12, // Bottom
+                            16, 17, 18, 18, 19, 16, // Right
+                            20, 21, 22, 22, 23, 20 // Left
+            };
+    
+    }
+    
 }

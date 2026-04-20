@@ -200,15 +200,22 @@ function getElevation(wx, wz) {
     // Generate noise value [-1, 1], scale it, and snap to integer steps (Minecraft style blocks)
     let n = simplex.noise2D(wx / NOISE_SCALE, wz / NOISE_SCALE);
     let h = Math.floor(n * HEIGHT_SCALE);
+    userHeights.set(key, h);
     return h;
 }
 
+const ceilHeights = new Map();
 function getCeilingElevation(wx, wz) {
+    const key = `${wx},${wz}`;
+    if (ceilHeights.has(key)) return ceilHeights.get(key);
+    
     let n = simplex.noise2D(wx / NOISE_SCALE, wz / NOISE_SCALE);
     // Ceiling planet has highly flattened slopes (0.2x)
     let hCeil = Math.floor(n * (HEIGHT_SCALE * 0.2));
     // The visual blocks construct downwards from CEILING_BASE
-    return CEILING_BASE - hCeil;
+    let h = CEILING_BASE - hCeil;
+    ceilHeights.set(key, h);
+    return h;
 }
 
 const chunks = new Map();
@@ -261,7 +268,20 @@ function generateChunk(cx, cz) {
 
             // Ground planet column (thicker, down to -30 bedrock)
             for (let y = -30; y <= h; y++) {
-                blockData.push({ x: wx, y: y, z: wz });
+                if (removedBlocks.has(`${wx},${y},${wz}`)) continue;
+                let isTop = (y === h);
+                let exposed = isTop || y === -30 ||
+                    !isBlockSolid(wx + 1, y, wz) ||
+                    !isBlockSolid(wx - 1, y, wz) ||
+                    !isBlockSolid(wx, y + 1, wz) ||
+                    !isBlockSolid(wx, y - 1, wz) ||
+                    !isBlockSolid(wx, y, wz + 1) ||
+                    !isBlockSolid(wx, y, wz - 1);
+                
+                if (exposed) {
+                    if (isTop && !isBlockSolid(wx, y + 1, wz)) blockData.push({ x: wx, y: y, z: wz });
+                    else ceilingData.push({ x: wx, y: y, z: wz });
+                }
             }
 
             // Ceiling planet crust lowest physical point
@@ -269,34 +289,34 @@ function generateChunk(cx, cz) {
 
             // Ceiling planet column (Extends 15 layers UP into the ceiling base structure)
             for (let cy = cyLowest; cy <= cyLowest + 15; cy++) {
+                if (removedBlocks.has(`${wx},${cy},${wz}`)) continue;
                 // Add 3D Cave generation to the Ceiling planet using Noise
                 let caveNoise = simplex.noise3D(wx / 25, cy / 25, wz / 25);
                 if (Math.abs(caveNoise) > 0.12) {
-                    ceilingData.push({ x: wx, y: cy, z: wz });
+                    let exposed = cy === cyLowest || cy === cyLowest + 15 ||
+                        !isBlockSolid(wx + 1, cy, wz) ||
+                        !isBlockSolid(wx - 1, cy, wz) ||
+                        !isBlockSolid(wx, cy + 1, wz) ||
+                        !isBlockSolid(wx, cy - 1, wz) ||
+                        !isBlockSolid(wx, cy, wz + 1) ||
+                        !isBlockSolid(wx, cy, wz - 1);
+                    if (exposed) ceilingData.push({ x: wx, y: cy, z: wz });
                 }
             }
 
             // DEBUG Giant Wall Generation
             if (wx === -5 && wz >= -10 && wz <= 10) {
-                for (let y = 40; y <= 65; y++) blockData.push({ x: wx, y: y, z: wz });
+                for (let y = 40; y <= 65; y++) {
+                    if (!removedBlocks.has(`${wx},${y},${wz}`) && (!isBlockSolid(wx+1,y,wz)||!isBlockSolid(wx-1,y,wz)||!isBlockSolid(wx,y+1,wz)||!isBlockSolid(wx,y-1,wz)||!isBlockSolid(wx,y,wz+1)||!isBlockSolid(wx,y,wz-1)))
+                        ceilingData.push({ x: wx, y: y, z: wz });
+                }
             }
             if (wz === -5 && wx >= -10 && wx <= 10) {
-                for (let y = 40; y <= 65; y++) blockData.push({ x: wx, y: y, z: wz });
+                for (let y = 40; y <= 65; y++) {
+                    if (!removedBlocks.has(`${wx},${y},${wz}`) && (!isBlockSolid(wx+1,y,wz)||!isBlockSolid(wx-1,y,wz)||!isBlockSolid(wx,y+1,wz)||!isBlockSolid(wx,y-1,wz)||!isBlockSolid(wx,y,wz+1)||!isBlockSolid(wx,y,wz-1)))
+                        ceilingData.push({ x: wx, y: y, z: wz });
+                }
             }
-        }
-    }
-
-    // Apply user modifications
-    for (let i = blockData.length - 1; i >= 0; i--) {
-        const b = blockData[i];
-        if (removedBlocks.has(`${b.x},${b.y},${b.z}`)) {
-            blockData.splice(i, 1);
-        }
-    }
-    for (let i = ceilingData.length - 1; i >= 0; i--) {
-        const c = ceilingData[i];
-        if (removedBlocks.has(`${c.x},${c.y},${c.z}`)) {
-            ceilingData.splice(i, 1);
         }
     }
 
@@ -682,11 +702,35 @@ function animate(time) {
 
             const playerObj = controls.getObject();
             const PLAYER_RADIUS = 0.3 * TILE_SIZE; // Width (slightly narrower for less getting stuck on corners)
+            
+            if (typeof window.playerEyeOffset === 'undefined') window.playerEyeOffset = 3.6;
+
+            let py = playerObj.position.y - window.playerEyeOffset;
 
             // Adjust physical hitbox based on crouch state (2.0 to 1.5 blocks tall)
             const heightMultiplier = isCrouching ? 1.5 : 2.0;
             const PLAYER_HEIGHT = Math.max(0.1, heightMultiplier * TILE_SIZE); // Height from feet to head
-            const PLAYER_EYE_OFFSET = Math.max(0.1, (heightMultiplier - 0.2) * TILE_SIZE); // Eyes are near the top of the height
+            const TARGET_EYE_OFFSET = Math.max(0.1, (heightMultiplier - 0.2) * TILE_SIZE); // Eyes are near the top of the height
+            
+            // Smoothly interpolate the eye offset to simulate organic ducking and prevent grounding breaks
+            window.playerEyeOffset += (TARGET_EYE_OFFSET - window.playerEyeOffset) * 15.0 * delta;
+            const PLAYER_EYE_OFFSET = window.playerEyeOffset;
+
+            // Helper to check if any solid block exists precisely under the footprint
+            function checkGround(px, py, pz) {
+                const minX = Math.round((px - PLAYER_RADIUS) / TILE_SIZE);
+                const maxX = Math.round((px + PLAYER_RADIUS) / TILE_SIZE);
+                const y = Math.round((py - 0.1) / TILE_SIZE); // Block immediately below feet
+                const minZ = Math.round((pz - PLAYER_RADIUS) / TILE_SIZE);
+                const maxZ = Math.round((pz + PLAYER_RADIUS) / TILE_SIZE);
+
+                for (let x = minX; x <= maxX; x++) {
+                    for (let z = minZ; z <= maxZ; z++) {
+                        if (isBlockSolid(x, y, z)) return true;
+                    }
+                }
+                return false;
+            }
 
             // Helper to check AABB collision against all voxels in a bounded box
             function checkCollision(px, py, pz) {
@@ -707,19 +751,15 @@ function animate(time) {
                 return false;
             }
 
-            // Current absolute position of feet
+            // Current absolute position of feet (py is calculated safely decoupled from top camera offset)
             let px = playerObj.position.x;
-            let py = playerObj.position.y - PLAYER_EYE_OFFSET;
             let pz = playerObj.position.z;
 
             // Step X
             if (dispX !== 0) {
-                // Ledge prevention (Crouching) - Keeps player's center over the block
+                // Ledge prevention (Crouching) - Keeps player's box over the edge
                 if (isCrouching && isGrounded) {
-                    const bX = Math.round((px + dispX) / TILE_SIZE);
-                    const bY = Math.round((py - 0.1) / TILE_SIZE);
-                    const bZ = Math.round(pz / TILE_SIZE);
-                    if (!isBlockSolid(bX, bY, bZ)) {
+                    if (!checkGround(px + dispX, py, pz)) {
                         dispX = 0;
                         velocity.x = 0;
                     }
@@ -739,12 +779,9 @@ function animate(time) {
 
             // Step Z
             if (dispZ !== 0) {
-                // Ledge prevention (Crouching) - Keeps player's center over the block
+                // Ledge prevention (Crouching) - Keeps player's box over the edge
                 if (isCrouching && isGrounded) {
-                    const bX = Math.round(px / TILE_SIZE);
-                    const bY = Math.round((py - 0.1) / TILE_SIZE);
-                    const bZ = Math.round((pz + dispZ) / TILE_SIZE);
-                    if (!isBlockSolid(bX, bY, bZ)) {
+                    if (!checkGround(px, py, pz + dispZ)) {
                         dispZ = 0;
                         velocity.z = 0;
                     }
@@ -825,7 +862,8 @@ function animate(time) {
         }
     }
 
-    // Spawn new chunks
+    // Spawn new chunks via prioritized queue
+    const missingChunks = [];
     for (let x = -RENDER_DISTANCE; x <= RENDER_DISTANCE; x++) {
         for (let z = -RENDER_DISTANCE; z <= RENDER_DISTANCE; z++) {
             let cx = currentChunkX + x;
@@ -833,8 +871,27 @@ function animate(time) {
             let key = `${cx},${cz}`;
 
             if (!chunks.has(key)) {
-                let generated = generateChunk(cx, cz);
-                chunks.set(key, generated);
+                // Calculate Chebyshev distance (chunk radius distance)
+                let dist = Math.max(Math.abs(x), Math.abs(z));
+                missingChunks.push({ cx, cz, key, dist });
+            }
+        }
+    }
+
+    if (missingChunks.length > 0) {
+        // Sort to generate closest chunks first
+        missingChunks.sort((a, b) => a.dist - b.dist);
+
+        let chunksGenerated = 0;
+        for (let chunkInfo of missingChunks) {
+            let generated = generateChunk(chunkInfo.cx, chunkInfo.cz);
+            chunks.set(chunkInfo.key, generated);
+            chunksGenerated++;
+
+            // Detect & load instantly within 2 chunks radius for physics safety
+            // For blocks further away, throttle to 1 generation per frame to eliminate CPU stutters
+            if (chunkInfo.dist > 2 && chunksGenerated >= 1) {
+                break;
             }
         }
     }
