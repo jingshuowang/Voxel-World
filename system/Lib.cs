@@ -10,8 +10,8 @@ namespace Voxel.System {
         
         public static void Init(GL g) {
             gl = g;
-            al = AL.GetApi();
-            cl = CL.GetApi();
+            try { al = AL.GetApi(); } catch { Console.WriteLine("[WARN] OpenAL not found."); }
+            try { cl = CL.GetApi(); } catch { Console.WriteLine("[WARN] OpenCL not found."); }
         }
     }
 }

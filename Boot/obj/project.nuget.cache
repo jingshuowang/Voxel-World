@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "dgSpecHash": "bESgubON1oQ=",
+  "success": true,
+  "projectFilePath": "E:\\jason\\AGcode\\Voxel-World\\Boot\\run.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\wangn\\.nuget\\packages\\microsoft.dotnet.platformabstractions\\3.1.6\\microsoft.dotnet.platformabstractions.3.1.6.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\microsoft.extensions.dependencymodel\\7.0.0\\microsoft.extensions.dependencymodel.7.0.0.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.core\\2.17.1\\silk.net.core.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.glfw\\2.17.1\\silk.net.glfw.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.input\\2.17.1\\silk.net.input.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.input.common\\2.17.1\\silk.net.input.common.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.input.glfw\\2.17.1\\silk.net.input.glfw.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.input.sdl\\2.17.1\\silk.net.input.sdl.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.maths\\2.17.1\\silk.net.maths.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.openal\\2.17.1\\silk.net.openal.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.opencl\\2.17.1\\silk.net.opencl.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.opengl\\2.17.1\\silk.net.opengl.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.sdl\\2.17.1\\silk.net.sdl.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.windowing\\2.17.1\\silk.net.windowing.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.windowing.common\\2.17.1\\silk.net.windowing.common.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.windowing.glfw\\2.17.1\\silk.net.windowing.glfw.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\silk.net.windowing.sdl\\2.17.1\\silk.net.windowing.sdl.2.17.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\stbimagesharp\\2.30.15\\stbimagesharp.2.30.15.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\ultz.native.glfw\\3.3.9.1\\ultz.native.glfw.3.3.9.1.nupkg.sha512",
+    "C:\\Users\\wangn\\.nuget\\packages\\ultz.native.sdl\\2.24.3.1\\ultz.native.sdl.2.24.3.1.nupkg.sha512"
+  ],
+  "logs": []
+}
