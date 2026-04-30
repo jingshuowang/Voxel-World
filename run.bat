@@ -1,4 +1,4 @@
 @echo off
 cd Boot
 dotnet run -c Release
-pause
+if %errorlevel% neq 0 pause

@@ -41,3 +41,10 @@ E:\jason\AGcode\Voxel-World\Boot\obj\Release\refint\run.dll
 E:\jason\AGcode\Voxel-World\Boot\obj\Release\run.pdb
 E:\jason\AGcode\Voxel-World\Boot\obj\Release\run.genruntimeconfig.cache
 E:\jason\AGcode\Voxel-World\Boot\obj\Release\ref\run.dll
+E:\jason\AGcode\Voxel-World\Boot\lib\ImGui.NET.dll
+E:\jason\AGcode\Voxel-World\Boot\lib\Silk.NET.Input.Extensions.dll
+E:\jason\AGcode\Voxel-World\Boot\lib\Silk.NET.OpenGL.Extensions.ImGui.dll
+E:\jason\AGcode\Voxel-World\Boot\lib\runtimes\linux-x64\native\libcimgui.so
+E:\jason\AGcode\Voxel-World\Boot\lib\runtimes\osx\native\libcimgui.dylib
+E:\jason\AGcode\Voxel-World\Boot\lib\runtimes\win-x64\native\cimgui.dll
+E:\jason\AGcode\Voxel-World\Boot\lib\runtimes\win-x86\native\cimgui.dll

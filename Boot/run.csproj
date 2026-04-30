@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="Silk.NET.OpenGL" Version="2.17.1" />
+    <PackageReference Include="Silk.NET.OpenGL.Extensions.ImGui" Version="2.17.1" />
     <PackageReference Include="Silk.NET.Windowing" Version="2.17.1" />
     <PackageReference Include="Silk.NET.Input" Version="2.17.1" />
     <PackageReference Include="Silk.NET.Maths" Version="2.17.1" />
@@ -31,6 +32,7 @@
   <ItemGroup>
     <Compile Include="..\system\**\*.cs" />
     <Compile Include="..\client\**\*.cs" />
+    <Compile Include="..\experimental\**\*.cs" />
   </ItemGroup>
 
 </Project>
