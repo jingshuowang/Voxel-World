@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "iKT/YldC53g=",
+  "success": true,
+  "projectFilePath": "E:\\jason\\AGcode\\Voxel-World\\Server\\Server.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\wangn\\.nuget\\packages\\watsonwebsocket\\4.1.8\\watsonwebsocket.4.1.8.nupkg.sha512"
+  ],
+  "logs": []
+}

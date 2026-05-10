@@ -33,6 +33,7 @@
     <Compile Include="..\system\**\*.cs" />
     <Compile Include="..\client\**\*.cs" />
     <Compile Include="..\experimental\**\*.cs" />
+    <Compile Include="..\UI\**\*.cs" />
   </ItemGroup>
 
 </Project>

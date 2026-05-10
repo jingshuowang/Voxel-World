@@ -1,0 +1,58 @@
+[
+  {
+    "Name": "Air",
+    "BaseColor": { "X": 0.0, "Y": 0.0, "Z": 0.0 },
+    "Roughness": 0.0,
+    "Hardness": 0.0,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Stone",
+    "BaseColor": { "X": 0.5, "Y": 0.5, "Z": 0.5 },
+    "Roughness": 0.7,
+    "Hardness": 1.0,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Dirt",
+    "BaseColor": { "X": 0.4, "Y": 0.28, "Z": 0.15 },
+    "Roughness": 0.9,
+    "Hardness": 0.5,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Grass",
+    "BaseColor": { "X": 0.25, "Y": 0.7, "Z": 0.25 },
+    "Roughness": 0.9,
+    "Hardness": 0.5,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Snow",
+    "BaseColor": { "X": 0.85, "Y": 0.9, "Z": 1.0 },
+    "Roughness": 0.6,
+    "Hardness": 0.4,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Wood",
+    "BaseColor": { "X": 0.35, "Y": 0.2, "Z": 0.05 },
+    "Roughness": 0.8,
+    "Hardness": 0.8,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Leaves",
+    "BaseColor": { "X": 0.1, "Y": 0.5, "Z": 0.1 },
+    "Roughness": 0.9,
+    "Hardness": 0.2,
+    "Brightness": 0.0
+  },
+  {
+    "Name": "Glowstone",
+    "BaseColor": { "X": 1.0, "Y": 0.8, "Z": 0.4 },
+    "Roughness": 0.5,
+    "Hardness": 0.3,
+    "Brightness": 2.0
+  }
+]

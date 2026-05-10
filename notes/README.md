@@ -5,6 +5,26 @@ optimizations simple and data
  2) Skipping empty space efficiently during DDA raymarching.
  3) Storing block IDs/Data compactly in the 3D texture (RGBA32f for now, could be compressed later).
 
+Physics:
+Cauculates every tick, but separated form the rendering which is deltatime, but this is fixed step. Lets say 64 steps, yes not 20 its 64, cus its balanced, with clientside prediction. But we are focusing on physics.  
+Step 1: Kinematics
+so this is very terribly designed but its ok, no collision no detection just simple movement. 
+the postion of the pervious tick plus the velocity times tickspeed is the new postion. Very efficient. with acceleration its just velocity of the previous tick plus the acceleration times tickspeed is the new one, same thing. But cus this is still kinematics literally just do when button held set velocity to a vlaue like lets say 10 and when let go set to 0, and add decay like eveyrtick vel = 0.95 of previous. this is obviously fake and terrible.
+Step 2: Basic Forces:
+So rember the setting, thats stupid, lets use forces, so now we do not often literally jsut change velocity and acceleratio ndirection, instead we give forces.clientside can also send forces like detection, wait ignore that no clientside sends input, physics processes it, so forces, accleeration, and mass are closely related, lets say for now our player is 64 unit in mass, just do f=ma, done, boom, and for the proviosu multiply by 0.16 that was stupid literally just use drag force, its diffrent from friction, which add later cus its accualy kidna compelx drag is just not here be gona fake it, just applie a force opposite to the velocity but wiht magnitude so the force is equal to the velocity(vector) times the speed( scalar) and then -1 and the drag coeffficeint which lets say is just 0.96 right now..also force velocity accleration , accualy most of these physics thingys are all vectors.
+Step 2.5: Before Step 3 we gotta setup collision detection and other stuff. firstly the hitbox of a player is a cappsule but is shown as a prism (1 by 1 by 2). Capsule physics collision detection is easy, the landform(static) voxels uses aabb cus its alined to axis and particle/dynamic objects cannot do that but we only have voxels so i guess dynamic voxels just use SAT on gpu. It spits out info like collision depth and normal which makes respond easy. At this step we dont need responce just yet. just make colliding objects change to red color. for this one, we cnat directl;y put in our engine since theres only one enityt but we can add a second entity which just is gona be our test subject. so wait we can do a special seed 0, which is just a flat world but same physics and that will be enter, no collision responce just yet but we can spawn random things floating in the sky and turn red when colliding.
+new idea: static is aligned to the grid while dynamic is not. all collision with dynamic and static must use a 32th SV32 lmao tree not a octree, and its maximum size is infiniti or to the server size. only cauculate collisions within each cell. then broad is sphere check and then at finer levels its obb with sat. very simple. this is onyl detection plus sat give you the pen depth.
+soits like this for the entitys it only checks within2 times the aabb of stuff it acts like its phantom hitbox and thats the svo cell it takes up, and within the svo cells it can see what svo cells and taken up and detects collision within that place. the reason its 2 times is because if its a capsule hitbox made of voxels the bottom might break with aabb cus its too close. sphere also is bad so we eather use a aabb hitbix for player which is fake for capsule which is not voxels this is weird. and thats for entitys while the static objects are just aligned to the grid and literally jut aabbing and only gets detected within entity radius. entitys can also be connected and eather rigid connection which in SVO is treated as one large aabb big back. but normal slim check. only checking the face voxels and corner voxels and the edge voxels. dynamicconnection is accualy much simpler just connection/effectance factor and eveyrhting follows the joints perfect. player is the onlything that dosent use box physics for narrow phase though still just the 2x aabb for the broad phase, it will use a capsule tsince its very efficent. Later: Cellular automata fluids,  softbody. Thermal and eletric energy. Raycasted audio.
+Step 3: Friction:
+The force of friction is the friction coefficent times the normal force. The force that counters gravity and friction is cauculated at collision, there are 2 types , kinetic and static friction.  When at rest its static and motion is kinetic but static is always higher than kinetic. When colision the friction of one object is averaged with the other object. 
+Step 4 Drag:
+Fianlly we replacing stoppid multiplicaion decay with drag. The force of drag is -b, the drag coefficient times the velocity. A object terminal velocity is the force of gravity times the mass divided by the drag coefficient. nice :D.
+Step 5 Collision(responce) and Momentum:
+The force of momentum is mass times velocity, p=mv.And elastiticity or restitution or bounciness is how much energy is conserved at collision. Direction and other stuff is basic physics.
+Step 6 Rotational Physics and Momentum:
+theres angular pos, angular vel, angular acc. Which is theta omega and alpha.  same equation as the kinematics for angular kinematics but just diffrent names, they can be transfered and thats it.
+
+
 
 
 
@@ -81,7 +101,7 @@ Add decompisition after mined, entityu uses newtons laws and phsycis. but not th
 
 advanced contorls: tab for inventory, f3 for stats, f5 for loop though the 4 render methods, raycasting, normal map(direction),  depth map, and triangle edge.
 
-PROBELMS: when i look down or up too much the screen flips for soem reason and i cnat mvoem y mouse properly. no add phsyics, seed ysstme,  everythings a mess, need deep cleanup foir code. Need to optimize data bit masking and unneccesary code. Not dynamic movement is linear.
+PROBLEMS: when i look down or up too much the screen flips for soem reason and i cnat mvoem y mouse properly. no add phsyics, seed ysstme,  everythings a mess, need deep cleanup foir code. Need to optimize data bit masking and unneccesary code. Not dynamic movement is linear.
 
 IDEAS: Add realistic grouping, each voxel can be in a group whch sticks together, Raycast is way too lggy and noisy, seeds use a similar math function to hashmapping to generate a world the secreat thing could be hexadecimal of "Jingshuo67". chunks are 16x16x16 world has lots of chunks so only process changes. and render/processing within range. World is 2^20 by 2^20 by 2^12. and seed is 64 bit int. For fluids we could add eatiehr a softbody or particle based simulation. Texture file can be in assets, stores texture, brighjtness, roughness, and UV(base texture) becaue currentl;y its just simpley only blocks just place on the outside of a block. PHysics inthe game can be complex later, realistic physics for voxels is cool.Generate with DLA paired with fractak perlin noice. So generation dosent use chunkswe use chunks for faster, chunksi ngeneration istoo problems if we use chunks like cutoffs. Compute shader is a very genius idea, it is good for complex caucualtuions liek rycasting and colision detection and physics. We can name the game BitBox.
 
@@ -91,3 +111,8 @@ Future ideas: Mana, Volumumetric light, Abilitys, Civilatzation, better serversi
 AI- mutual ones have a health your rating and groups, harmful ones pathfind you atack and have health too since its an entity.
 
 Minigame idea: blob jump around can flip gravity and goes based on ground dir. 
+
+PROBLEM BASH: 
+- **Circular Rendering Patterns**: Concentric rings appearing on terrain, likely due to float precision issues at extreme coordinates or LOD transitions. The steeper the terrain, the more serious the problem.
+- **Insanely Long Render Time**: Raymarching performance is poor (barely 20 FPS), needs optimization or a rewrite later.
+- **General Code Messiness**: Some parts are a bit messy/corrupted. Deprioritizing rendering fixes for now to focus on World Generation features.

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"e:\\\\jason\\\\AGcode\\\\Voxel-World\\\\system\\\\\")",
+      "Bash(dotnet build *)"
+    ]
+  }
+}
