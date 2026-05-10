@@ -51,17 +51,16 @@ namespace Voxel.Server {
                 if (fp.Y < h - 1.0f) return UI.BlockRegistry.Dirt.ToGpuData();
                 
                 // Surface biomes scaled by amplitude
-                if (relativeH > amp * 0.75f) return UI.BlockRegistry.Snow.ToGpuData();
-                if (relativeH > amp * 0.25f) return UI.BlockRegistry.Grass.ToGpuData();
+                if (relativeH > amp * 0.40f) return UI.BlockRegistry.Snow.ToGpuData();
+                if (relativeH > amp * 0.05f) return UI.BlockRegistry.Grass.ToGpuData();
                 return UI.BlockRegistry.Dirt.ToGpuData(); // Lowlands
             }
 
             // Trees (spawn on grass biome)
             float ys = MathF.Floor(h);
-            bool isGrass = (relativeH > amp * 0.25f) && (relativeH <= amp * 0.75f);
 
             // 1. Check if CURRENT column is a trunk
-            if (isGrass && HasTree(fp.X, fp.Z)) {
+            if (HasTree(fp.X, fp.Z)) {
                 if (fp.Y >= ys + 1f && fp.Y <= ys + 3f) return UI.BlockRegistry.Wood.ToGpuData();
             }
 
@@ -73,9 +72,8 @@ namespace Voxel.Server {
                     float nh = GetHeight(nx, nz);
                     float nys = MathF.Floor(nh);
                     float nRelH = nh - 20.0f;
-                    bool nIsGrass = (nRelH > amp * 0.25f) && (nRelH <= amp * 0.75f);
 
-                    if (nIsGrass && HasTree(nx, nz)) {
+                    if (HasTree(nx, nz)) {
                         // Leaves spawn at height nys + 4 in a 3x3 area
                         if (fp.Y == nys + 4f) return UI.BlockRegistry.Leaves.ToGpuData();
                         // Peak of the tree on top of the trunk
@@ -91,7 +89,7 @@ namespace Voxel.Server {
             int ix = (int)MathF.Floor(x), iz = (int)MathF.Floor(z);
             uint h = (uint)(ix * 73856093 ^ iz * 19349663) * 2246822519u;
             h ^= h >> 13; h *= 0x45d9f3bu; h ^= h >> 16;
-            return (h & 0xFFF) < 100;
+            return (h & 0xFFF) < 300;
         }
 
         public static float GetHeight(float x, float z) {
