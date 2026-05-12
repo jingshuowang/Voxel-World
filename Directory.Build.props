@@ -1,7 +1,0 @@
-<Project>
-  <ItemGroup>
-    <Compile Remove="notes\**" />
-    <Content Remove="notes\**" />
-    <None Include="notes\**" />
-  </ItemGroup>
-</Project>
