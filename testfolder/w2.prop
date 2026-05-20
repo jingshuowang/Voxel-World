@@ -1,0 +1,9 @@
+//
+base1 = 20,25 || 120,88 || None||0|0
+base1:fill1 = 28,33 || 65,53 || Slider||0.45|speed
+base1:fill2 = 73,33 || 110,53 || Text|150|0|height
+//
+*
+speed(int) = 45;
+height(int) = 150;
+*

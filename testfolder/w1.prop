@@ -1,0 +1,10 @@
+//
+base1 = 50,20 || 120,95 || None||0|0
+base1:scroll1 = 52,25 || 117,87 || None||0|scores
+base1:scroll1:fill1 = 55,30 || 115,42 || Slider||0.8|scores
+base1:scroll1:fill2 = 55,45 || 115,57 || Slider||0.4|scores
+base1:scroll1:fill3 = 55,60 || 115,72 || Text|95|0|0
+//
+*
+scores(list) = [80, 40, 95];
+*

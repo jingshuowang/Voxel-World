@@ -1,0 +1,9 @@
+{
+  "name": "voxel-world-prototype",
+  "version": "1.0.0",
+  "description": "Prototype for Voxel World",
+  "scripts": {
+    "start": "npx serve"
+  },
+  "dependencies": {}
+}

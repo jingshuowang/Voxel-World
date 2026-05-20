@@ -1,0 +1,12 @@
+//
+base1 = 103,34 || 263,154 || None|Value|0.5|0
+base1:scroll1 = 114,60 || 251,138 || None|Value|0.5|scroll0
+base1:scroll1:fill1 = 150,65 || 174,69 || Text|0|0.5|0
+base1:scroll1:fill2 = 176,67 || 204,71 || Text|0|0.5|0
+base1:scroll1:fill3 = 210,66 || 243,73 || Text|0|0.5|0
+base1:scroll1:fill4 = 131,75 || 133,91 || Text|0|0.5|0
+base1:scroll1:fill5 = 122,96 || 140,107 || Text|0|0.5|0
+//
+*
+scroll0(list) = [0, 0, 0, 0, 0];
+*

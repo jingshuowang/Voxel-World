@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="GUI.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:GUI"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    mc:Ignorable="d"
+    Background="White">
+
+    <Grid IsTabStop="True" Background="Transparent" x:Name="RootGrid"
+          KeyDown="Grid_KeyDown"
+          KeyUp="Grid_KeyUp"
+          CharacterReceived="Grid_CharacterReceived"
+          PointerPressed="Grid_PointerPressed"
+          PointerMoved="Grid_PointerMoved"
+          PointerReleased="Grid_PointerReleased"
+          PointerWheelChanged="Grid_PointerWheelChanged">
+        <canvas:CanvasControl x:Name="canvas" 
+                              AllowFocusOnInteraction="False"
+                              IsTabStop="False"
+                              Draw="Canvas_Draw" />
+        
+    </Grid>
+</Page>

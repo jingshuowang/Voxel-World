@@ -1,1 +1,0 @@
-when in this folder its literally just random files but only one at a time and in console pressing e just takes to the file in this folder.
